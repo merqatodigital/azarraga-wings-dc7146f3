@@ -22,21 +22,40 @@ export const listAgentModels=createServerFn({method:"GET"}).middleware([requireS
 });
 
 const AskInput=z.object({message:z.string().min(1),model:z.string().min(1),intent:z.enum(["leads","quotes","invoices","icm","documents","general"]).default("general")});
-const SYSTEM_RULES=`You are the Azarraga Commercial Agent for Azarraga Glass & Aluminum in Palawan, Philippines.
-Your jobs are FIND BUSINESS, WIN BUSINESS and BILL BUSINESS. Use commercial memory as evidence, never permission to invent a current price. Never infer VAT/tax treatment. Never issue or send a quote or invoice. Deterministic code performs final arithmetic and a human approves commercial documents. Never fabricate historical records, prices, customers or documents. Clearly separate FACT, DERIVED VALUE, AGENT INFERENCE and HUMAN-APPROVED VALUE. Base currency is PHP.`;
+const SYSTEM_RULES=`You are TALA, the Azarraga Commercial Agent for Azarraga Glass & Aluminum in Palawan, Philippines.
+Your jobs are FIND BUSINESS, WIN BUSINESS, UNDERSTAND THE CUSTOMER, UNDERSTAND THE JOB, and BILL BUSINESS.
+
+COMMERCIAL MEMORY RULES:
+1. Read source_documents as provenance. A document's doc_type controls what it means. A client PURCHASE ORDER is an order received by Azarraga; it is NOT an Azarraga invoice and must never be called one.
+2. Learn customer identity from customers and contacts: company/name, billing address, TIN, phone, email and people/roles. If a field is absent, say it is not recorded. Never invent a contact person or telephone number.
+3. Learn project history from projects, purchaseOrders and itemsPurchased. Preserve opening codes such as SD4, SD5 and D5, system names such as 900 Series, configuration, glass thickness/type, frame color, dimensions, quantities and included services.
+4. commercialMemory contains historical price evidence. Historical prices may be compared across dated source documents, but they are NEVER permission to invent or approve a current price. State the source PO and date when discussing historical prices.
+5. Distinguish product price from crating, shipping, trucking, delivery, installation and discounts. Do not silently spread logistics or discounts across unit prices.
+6. Amounts in database fields ending _centavos are integer centavos. Convert to PHP pesos for people.
+7. Never infer VAT/tax treatment from a displayed VAT amount. Never issue or send a quote or invoice. Deterministic code performs final arithmetic and a human approves commercial documents.
+8. Never fabricate historical records, prices, customers, dimensions or documents. If source data is ambiguous, flag it for human confirmation.
+9. When asked what we sold a customer, answer from the dated PO/product history, not from generic product knowledge.
+10. Clearly separate FACT, DERIVED VALUE, AGENT INFERENCE and HUMAN-APPROVED VALUE. Base currency is PHP.`;
 
 export const askAgent=createServerFn({method:"POST"}).middleware([requireSupabaseAuth]).inputValidator((input:unknown)=>AskInput.parse(input)).handler(async({data,context})=>{
  const key=runtimeSecret("OPENROUTER_API_KEY");if(!key)return{error:"OpenRouter secret is not visible to the deployed app runtime.",reply:"",model:data.model};
  const{supabase}=context;
- const[evidence,quotes,invoices,leads,docs,customers]=await Promise.all([
-  supabase.from("commercial_evidence").select("product_family, system, customer_name, project_name, location, width_mm, height_mm, quantity, historical_unit_price_centavos, currency, source_reference, source_date, pricing_type").order("source_date",{ascending:false}).limit(60),
+ const[evidence,quotes,invoices,leads,docs,customers,contacts,projects,purchaseOrders,itemsPurchased]=await Promise.all([
+  supabase.from("commercial_evidence").select("product_family, system, configuration, glass, frame_color, customer_name, project_name, location, width_mm, height_mm, quantity, historical_unit_price_centavos, historical_line_amount_centavos, currency, included_services, source_reference, source_date, pricing_type, raw").order("source_date",{ascending:false}).limit(100),
   supabase.from("quotes").select("quote_number, customer_name, project_name, status, total_centavos, warnings, quote_date").order("created_at",{ascending:false}).limit(20),
-  supabase.from("invoices").select("invoice_number, customer_name, project_name, status, total_centavos, balance_centavos, invoice_type").order("created_at",{ascending:false}).limit(20),
+  supabase.from("invoices").select("invoice_number, customer_name, project_name, status, total_centavos, balance_centavos, invoice_type, po_reference").order("created_at",{ascending:false}).limit(20),
   supabase.from("leads").select("project, location, project_type, status, score, next_action").order("created_at",{ascending:false}).limit(20),
-  supabase.from("source_documents").select("doc_type, reference, customer_name, project_name, ingestion_status, doc_date, extracted").order("created_at",{ascending:false}).limit(20),
-  supabase.from("customers").select("name, company, project_address").order("created_at",{ascending:false}).limit(30)
+  supabase.from("source_documents").select("doc_type, reference, customer_name, project_name, location, ingestion_status, doc_date, extracted, missing_information, conflicts, human_review_required, notes").order("doc_date",{ascending:false}).limit(40),
+  supabase.from("customers").select("id, name, company, billing_address, project_address, tin, phone, email, notes").order("created_at",{ascending:false}).limit(50),
+  supabase.from("contacts").select("customer_id, name, role, phone, email, notes").order("created_at",{ascending:false}).limit(50),
+  supabase.from("projects").select("id, customer_id, name, location, status, notes").order("created_at",{ascending:false}).limit(50),
+  supabase.from("purchase_orders").select("id, po_number, customer_id, project_id, po_date, total_centavos, currency, terms, status, comparison, source_document_id").order("po_date",{ascending:false}).limit(50),
+  supabase.from("items_purchased").select("customer_id, project_id, purchase_order_id, product_family, system, description, glass, frame_color, width_mm, height_mm, quantity, unit_price_centavos, currency, purchased_on, source_reference").order("purchased_on",{ascending:false}).limit(150)
  ]);
- const dbError=[evidence,quotes,invoices,leads,docs,customers].find((r:any)=>r.error)?.error;if(dbError)return{error:`Commercial memory query failed: ${dbError.message}`,reply:"",model:data.model};
- const contextJson=JSON.stringify({note:"Amounts are integer centavos in PHP. Historical prices are evidence only.",commercialMemory:evidence.data??[],quotes:quotes.data??[],invoices:invoices.data??[],leads:leads.data??[],sourceDocuments:docs.data??[],customers:customers.data??[]});
+ const dbError=[evidence,quotes,invoices,leads,docs,customers,contacts,projects,purchaseOrders,itemsPurchased].find((r:any)=>r.error)?.error;if(dbError)return{error:`Commercial memory query failed: ${dbError.message}`,reply:"",model:data.model};
+ const contextJson=JSON.stringify({
+  note:"Amounts are integer centavos in PHP. Historical prices are evidence only. Source document type is authoritative for document meaning.",
+  commercialMemory:evidence.data??[],quotes:quotes.data??[],invoices:invoices.data??[],leads:leads.data??[],sourceDocuments:docs.data??[],customers:customers.data??[],contacts:contacts.data??[],projects:projects.data??[],purchaseOrders:purchaseOrders.data??[],itemsPurchased:itemsPurchased.data??[]
+ });
  try{const res=await fetch(OPENROUTER_CHAT,{method:"POST",headers:{Authorization:`Bearer ${key}`,"Content-Type":"application/json","HTTP-Referer":"https://azarraga.vercel.app","X-Title":"Azarraga Commercial Agent"},body:JSON.stringify({model:data.model||"openrouter/free",messages:[{role:"system",content:`${SYSTEM_RULES}\nCurrent intent: ${data.intent}.\nLIVE COMMERCIAL CONTEXT:\n${contextJson}`},{role:"user",content:data.message}],temperature:.2})});const json=await res.json() as any;if(!res.ok)return{error:json?.error?.message??`OpenRouter returned ${res.status}`,reply:"",model:data.model};return{error:null as string|null,reply:String(json?.choices?.[0]?.message?.content??""),model:data.model,humanReviewRequired:true};}catch(error){console.error("[Azarraga Agent] request failed",error);return{error:"Agent request failed.",reply:"",model:data.model};}
 });
