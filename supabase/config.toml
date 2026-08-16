@@ -1,1 +1,4 @@
 project_id = "tktqpnhsysiblodyjrrw"
+
+[functions.tala-document-extract]
+verify_jwt = true
