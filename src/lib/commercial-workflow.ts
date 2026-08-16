@@ -1,0 +1,80 @@
+import { supabase } from '@/integrations/supabase/client'
+
+export type LeadDraft={project:string;location:string;projectType:string;customerName?:string;email?:string;phone?:string;notes?:string}
+export type QuoteLineDraft={description:string;quantity:number;unit:string;unitPriceCentavos:number;productFamily?:string;system?:string;glass?:string;frame?:string;widthMm?:number;heightMm?:number}
+export type QuoteDraft={leadId?:string;customerName:string;projectName:string;location?:string;terms?:string;leadTime?:string;lines:QuoteLineDraft[]}
+
+const fail=(label:string,error:any):never=>{throw new Error(`${label}: ${error?.message||String(error)}`)}
+
+export async function createLeadWorkflow(input:LeadDraft){
+ const {data:{user}}=await supabase.auth.getUser(); if(!user) throw new Error('Sign in required')
+ let customerId:string|null=null
+ if(input.customerName?.trim()){
+  const {data:c,error}=await supabase.from('customers').insert({name:input.customerName.trim(),email:input.email||null,phone:input.phone||null,project_address:input.location,notes:input.notes||null,created_by:user.id}).select('id').single(); if(error)fail('Create customer',error); customerId=c.id
+ }
+ const {data:lead,error}=await supabase.from('leads').insert({project:input.project.trim(),location:input.location.trim()||'Palawan',project_type:input.projectType||'Commercial',status:'DISCOVERED',score:0,next_action:'Identify decision maker and request plans',customer_id:customerId,created_by:user.id}).select('*').single(); if(error)fail('Create lead',error)
+ if(input.customerName?.trim()){
+  const {error:contactError}=await supabase.from('contacts').insert({name:input.customerName.trim(),email:input.email||null,phone:input.phone||null,lead_id:lead.id,customer_id:customerId,role:'Client',created_by:user.id}); if(contactError)fail('Create contact',contactError)
+ }
+ return lead
+}
+
+export async function createQuoteWorkflow(input:QuoteDraft){
+ const {data:{user}}=await supabase.auth.getUser(); if(!user) throw new Error('Sign in required')
+ if(!input.lines.length) throw new Error('Add at least one quote line')
+ if(input.lines.some(l=>!l.description.trim()||l.quantity<=0||l.unitPriceCentavos<0)) throw new Error('Every line needs description, quantity and a valid price')
+ let customerId:string|null=null, projectId:string|null=null
+ const {data:existing}=await supabase.from('customers').select('id').ilike('name',input.customerName.trim()).limit(1).maybeSingle()
+ if(existing) customerId=existing.id; else {const {data:c,error}=await supabase.from('customers').insert({name:input.customerName.trim(),project_address:input.location||null,created_by:user.id}).select('id').single();if(error)fail('Create customer',error);customerId=c.id}
+ const {data:p,error:pe}=await supabase.from('projects').insert({name:input.projectName.trim(),location:input.location||null,customer_id:customerId,source_lead_id:input.leadId||null,status:'QUOTING',created_by:user.id}).select('id').single();if(pe)fail('Create project',pe);projectId=p.id
+ const {data:num,error:ne}=await supabase.rpc('next_quote_number');if(ne)fail('Quote number',ne)
+ const subtotal=input.lines.reduce((s,l)=>s+Math.round(l.quantity*l.unitPriceCentavos),0)
+ const {data:q,error:qe}=await supabase.from('quotes').insert({quote_number:num,customer_id:customerId,customer_name:input.customerName.trim(),project_id:projectId,project_name:input.projectName.trim(),lead_id:input.leadId||null,location:input.location||null,status:'REVIEW',currency:'PHP',subtotal_centavos:subtotal,total_centavos:subtotal,tax_centavos:0,tax_treatment:null,terms:input.terms||null,lead_time:input.leadTime||null,warnings:['Tax treatment requires human approval'],created_by:user.id}).select('*').single();if(qe)fail('Create quote',qe)
+ const rows=input.lines.map((l,i)=>({quote_id:q.id,line_no:i+1,description:l.description.trim(),quantity:l.quantity,unit:l.unit||'pc',unit_price_centavos:l.unitPriceCentavos,amount_centavos:Math.round(l.quantity*l.unitPriceCentavos),product_family:l.productFamily||null,system:l.system||null,glass:l.glass||null,frame:l.frame||null,width_mm:l.widthMm||null,height_mm:l.heightMm||null,pricing_status:'CURRENT_APPROVED'}))
+ const {error:le}=await supabase.from('quote_lines').insert(rows);if(le)fail('Create quote lines',le)
+ if(input.leadId) await supabase.from('leads').update({status:'QUOTE_CREATED',customer_id:customerId,next_action:'Human review and approve quotation'}).eq('id',input.leadId)
+ return q
+}
+
+export async function approveQuoteWorkflow(quoteId:string){
+ const {data:{user}}=await supabase.auth.getUser();if(!user)throw new Error('Sign in required')
+ const {data:q,error:e}=await supabase.from('quotes').select('*,quote_lines(*)').eq('id',quoteId).single();if(e)fail('Load quote',e)
+ if(!q.quote_lines?.length)throw new Error('Cannot approve a quote with no line items')
+ const subtotal=q.quote_lines.reduce((s:number,l:any)=>s+Number(l.amount_centavos||0),0)
+ const extras=Number(q.crating_centavos||0)+Number(q.shipping_centavos||0)+Number(q.trucking_centavos||0)+Number(q.delivery_centavos||0)+Number(q.installation_centavos||0)-Number(q.discount_centavos||0)
+ if(q.tax_treatment==null)throw new Error('Set tax treatment before approval')
+ const tax=q.tax_rate_basis_points==null?0:Math.round((subtotal+extras)*Number(q.tax_rate_basis_points)/10000)
+ const total=Math.max(0,subtotal+extras+tax)
+ const {error}=await supabase.from('quotes').update({status:'APPROVED',subtotal_centavos:subtotal,tax_centavos:tax,total_centavos:total,approved_at:new Date().toISOString(),approved_by:user.id,warnings:[]}).eq('id',quoteId);if(error)fail('Approve quote',error)
+ return {subtotal,total,tax}
+}
+
+export async function createPOWorkflow(quoteId:string,poNumber:string){
+ const {data:{user}}=await supabase.auth.getUser();if(!user)throw new Error('Sign in required')
+ const {data:q,error:e}=await supabase.from('quotes').select('*,quote_lines(*)').eq('id',quoteId).single();if(e)fail('Load quote',e);if(q.status!=='APPROVED')throw new Error('Quote must be approved before PO entry')
+ const {data:po,error}=await supabase.from('purchase_orders').insert({po_number:poNumber.trim(),quote_id:q.id,project_id:q.project_id,customer_id:q.customer_id,status:'RECEIVED',currency:'PHP',total_centavos:q.total_centavos,created_by:user.id,comparison:{quoteTotalCentavos:q.total_centavos,matched:true}}).select('*').single();if(error)fail('Create PO',error)
+ if(q.quote_lines?.length){const {error:lineError}=await supabase.from('purchase_order_lines').insert(q.quote_lines.map((l:any,i:number)=>({purchase_order_id:po.id,line_no:i+1,description:l.description,quantity:l.quantity,unit:l.unit,unit_price_centavos:l.unit_price_centavos,amount_centavos:l.amount_centavos})));if(lineError)fail('Create PO lines',lineError)}
+ return po
+}
+
+export async function createInvoiceWorkflow(quoteId:string,poId?:string){
+ const {data:{user}}=await supabase.auth.getUser();if(!user)throw new Error('Sign in required')
+ const {data:q,error:e}=await supabase.from('quotes').select('*,quote_lines(*)').eq('id',quoteId).single();if(e)fail('Load quote',e);if(q.status!=='APPROVED')throw new Error('Only approved quotes can be invoiced')
+ const {data:num,error:ne}=await supabase.rpc('next_invoice_number');if(ne)fail('Invoice number',ne)
+ const {data:i,error}=await supabase.from('invoices').insert({invoice_number:num,quote_id:q.id,purchase_order_id:poId||null,project_id:q.project_id,customer_id:q.customer_id,customer_name:q.customer_name,project_name:q.project_name,status:'DRAFT',currency:'PHP',subtotal_centavos:q.subtotal_centavos,tax_centavos:q.tax_centavos,total_centavos:q.total_centavos,balance_centavos:q.total_centavos,terms:q.terms,created_by:user.id}).select('*').single();if(error)fail('Create invoice',error)
+ if(q.quote_lines?.length){const {error:lineError}=await supabase.from('invoice_lines').insert(q.quote_lines.map((l:any,n:number)=>({invoice_id:i.id,line_no:n+1,description:l.description,quantity:l.quantity,unit:l.unit,unit_price_centavos:l.unit_price_centavos,amount_centavos:l.amount_centavos})));if(lineError)fail('Create invoice lines',lineError)}
+ return i
+}
+
+export async function recordPaymentWorkflow(invoiceId:string,amountCentavos:number,method:string,reference?:string){
+ const {data:{user}}=await supabase.auth.getUser();if(!user)throw new Error('Sign in required');if(amountCentavos<=0)throw new Error('Payment must be greater than zero')
+ const {data:i,error:e}=await supabase.from('invoices').select('balance_centavos').eq('id',invoiceId).single();if(e)fail('Load invoice',e);if(amountCentavos>Number(i.balance_centavos))throw new Error('Payment exceeds invoice balance')
+ const {data:p,error}=await supabase.from('payments').insert({invoice_id:invoiceId,amount_centavos:amountCentavos,currency:'PHP',method,reference:reference||null,created_by:user.id}).select('*').single();if(error)fail('Record payment',error);return p
+}
+
+export async function uploadCommercialDocument(file:File,category:string,links:{customerId?:string;projectId?:string;quoteId?:string;purchaseOrderId?:string;invoiceId?:string}={}){
+ const {data:{user}}=await supabase.auth.getUser();if(!user)throw new Error('Sign in required')
+ const safe=file.name.replace(/[^a-zA-Z0-9._-]/g,'_'),path=`${user.id}/${Date.now()}-${safe}`
+ const {error:up}=await supabase.storage.from('commercial-documents').upload(path,file,{contentType:file.type||undefined,upsert:false});if(up)fail('Upload document',up)
+ const {data,error}=await supabase.from('client_documents').insert({bucket:'commercial-documents',storage_path:path,title:file.name,category,mime_type:file.type||null,file_size:file.size,customer_id:links.customerId||null,project_id:links.projectId||null,quote_id:links.quoteId||null,purchase_order_id:links.purchaseOrderId||null,invoice_id:links.invoiceId||null,created_by:user.id}).select('*').single();if(error){await supabase.storage.from('commercial-documents').remove([path]);fail('Save document record',error)}return data
+}
