@@ -1,4 +1,5 @@
 import { supabase } from "@/integrations/supabase/client";
+import { calculateLineAmount, normalizePurchaseOrderNumber } from "@/lib/purchase-order";
 
 export type LearnedDocument = {
   docType: "purchase_order" | "invoice" | "quotation" | "receipt" | "supplier_quote" | "unknown";
@@ -57,16 +58,30 @@ export async function learnCommercialDocument(clientDocumentId: string, learned:
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) throw new Error("Sign in required");
+  if (!Array.isArray(learned.lines)) throw new Error("Document extraction has no line-item array");
+  const normalizedReference = learned.reference?.trim()
+    ? normalizePurchaseOrderNumber(learned.reference)
+    : null;
+  if (learned.docType === "purchase_order" && !normalizedReference)
+    throw new Error("Purchase order reference is required before this document can be learned");
+  if (learned.docType === "purchase_order")
+    learned.lines.forEach((line, index) => {
+      if (!line.rawDescription?.trim())
+        throw new Error(`Purchase order line ${index + 1} is missing its raw description`);
+      if (!Number.isFinite(Number(line.quantity)) || Number(line.quantity) <= 0)
+        throw new Error(`Purchase order line ${index + 1} requires a quantity greater than zero`);
+    });
   const { data: cd, error: cde } = await supabase
     .from("client_documents")
     .select("*")
     .eq("id", clientDocumentId)
     .single();
   if (cde) fail("Load uploaded document", cde);
+  if (!cd) throw new Error("Uploaded document was not found");
   const header = {
     doc_type: learned.docType,
-    reference: learned.reference || null,
-    document_number: learned.reference || null,
+    reference: normalizedReference,
+    document_number: normalizedReference,
     filename: cd.title,
     storage_bucket: cd.bucket,
     storage_path: cd.storage_path,
@@ -105,6 +120,22 @@ export async function learnCommercialDocument(clientDocumentId: string, learned:
     created_by: user.id,
   };
   let source: any;
+  let priorExtractionReset = false;
+  const resetPriorExtraction = async (sourceDocumentId: string) => {
+    if (!cd.source_document_id || priorExtractionReset) return;
+    const cleanup = await Promise.all([
+      supabase.from("commercial_evidence").delete().eq("source_document_id", sourceDocumentId),
+      supabase.from("items_purchased").delete().eq("source_document_id", sourceDocumentId),
+      supabase.from("purchase_order_lines").delete().eq("source_document_id", sourceDocumentId),
+      supabase
+        .from("document_financial_adjustments")
+        .delete()
+        .eq("source_document_id", sourceDocumentId),
+    ]);
+    const cleanupError = cleanup.find((result) => result.error)?.error;
+    if (cleanupError) fail("Reset prior extraction for reprocessing", cleanupError);
+    priorExtractionReset = true;
+  };
   if (cd.source_document_id) {
     const { data, error } = await supabase
       .from("source_documents")
@@ -114,14 +145,6 @@ export async function learnCommercialDocument(clientDocumentId: string, learned:
       .single();
     if (error) fail("Update source document", error);
     source = data;
-    const cleanup = await Promise.all([
-      supabase.from("commercial_evidence").delete().eq("source_document_id", source.id),
-      supabase.from("items_purchased").delete().eq("source_document_id", source.id),
-      supabase.from("purchase_order_lines").delete().eq("source_document_id", source.id),
-      supabase.from("document_financial_adjustments").delete().eq("source_document_id", source.id),
-    ]);
-    const cleanupError = cleanup.find((x) => x.error)?.error;
-    if (cleanupError) fail("Reset prior extraction for reprocessing", cleanupError);
   } else {
     const { data, error } = await supabase
       .from("source_documents")
@@ -195,47 +218,114 @@ export async function learnCommercialDocument(clientDocumentId: string, learned:
       project = data;
     }
   }
-  await supabase
+  const { error: sourceRelationshipError } = await supabase
     .from("source_documents")
     .update({ customer_id: customer?.id || null, project_id: project?.id || null })
     .eq("id", source.id);
-  await supabase
+  if (sourceRelationshipError) fail("Link source document relationships", sourceRelationshipError);
+  const { error: clientRelationshipError } = await supabase
     .from("client_documents")
     .update({ customer_id: customer?.id || null, project_id: project?.id || null })
     .eq("id", clientDocumentId);
+  if (clientRelationshipError)
+    fail("Link uploaded document relationships", clientRelationshipError);
   let po: any = null;
-  if (learned.docType === "purchase_order" && learned.reference) {
-    const { data: found, error: findError } = await supabase
+  if (learned.docType === "purchase_order" && normalizedReference) {
+    for (const [index, adjustment] of (learned.adjustments || []).entries()) {
+      const amount = Number(adjustment.amountCentavos);
+      if (!Number.isInteger(amount) || amount < 0)
+        throw new Error(`Purchase order adjustment ${index + 1} has an invalid amount`);
+    }
+    const { data: linkedOrders, error: linkedOrderError } = await supabase
       .from("purchase_orders")
       .select("*")
-      .eq("po_number", learned.reference)
-      .limit(1)
-      .maybeSingle();
+      .eq("source_document_id", source.id)
+      .limit(2);
+    if (linkedOrderError) fail("Find source purchase order", linkedOrderError);
+    if ((linkedOrders || []).length > 1)
+      throw new Error("This source document is linked to duplicate purchase orders");
+    const { data: matches, error: findError } = await supabase
+      .from("purchase_orders")
+      .select("*")
+      .ilike("po_number", normalizedReference)
+      .limit(2);
     if (findError) fail("Find purchase order", findError);
-    po = found;
+    if ((matches || []).length > 1)
+      throw new Error(`Duplicate purchase orders already exist for ${normalizedReference}`);
+    const linkedOrder = linkedOrders?.[0] || null;
+    const numberMatch = matches?.[0] || null;
+    if (linkedOrder && numberMatch && linkedOrder.id !== numberMatch.id)
+      throw new Error(
+        `Purchase order ${normalizedReference} is already linked to a different source document`,
+      );
+    po = linkedOrder || numberMatch;
     if (po && po.source_document_id && po.source_document_id !== source.id)
       throw new Error(
-        `Purchase order ${learned.reference} is already linked to a different source document`,
+        `Purchase order ${normalizedReference} is already linked to a different source document`,
       );
+    const normalizedLines = learned.lines.map((line, index) => {
+      const quantity = Number(line.quantity);
+      const unitPrice = line.unitPriceCentavos == null ? 0 : Number(line.unitPriceCentavos);
+      const amount =
+        line.amountCentavos == null
+          ? calculateLineAmount(quantity, unitPrice)
+          : Number(line.amountCentavos);
+      if (!Number.isInteger(unitPrice) || unitPrice < 0)
+        throw new Error(`Purchase order line ${index + 1} has an invalid unit price`);
+      if (!Number.isInteger(amount) || amount < 0)
+        throw new Error(`Purchase order line ${index + 1} has an invalid line amount`);
+      return { line, quantity, unitPrice, amount };
+    });
+    const lineSubtotalCentavos = normalizedLines.reduce((sum, row) => sum + row.amount, 0);
+    const adjustmentTotalCentavos = (learned.adjustments || []).reduce(
+      (sum, adjustment) =>
+        sum +
+        (adjustment.type === "DISCOUNT"
+          ? -Math.abs(Number(adjustment.amountCentavos || 0))
+          : Number(adjustment.amountCentavos || 0)),
+      0,
+    );
+    const calculatedTotalCentavos = Math.max(0, lineSubtotalCentavos + adjustmentTotalCentavos);
+    const documentTotalCentavos =
+      learned.totalCentavos == null ? calculatedTotalCentavos : Number(learned.totalCentavos);
+    const totalMatched = documentTotalCentavos === calculatedTotalCentavos;
+    const comparison = {
+      source: "DOCUMENT_INGESTION",
+      mrsNumber: learned.mrsNumber,
+      expectedDate: learned.expectedDate,
+      memo: learned.memo,
+      transactionId: learned.transactionId,
+      lineSubtotalCentavos,
+      adjustmentTotalCentavos,
+      calculatedTotalCentavos,
+      documentTotalCentavos,
+      totalMatched,
+      humanReviewRequired: !totalMatched || source.human_review_required,
+    };
+    await resetPriorExtraction(source.id);
+    if (!totalMatched) {
+      const conflict = `Document total ${documentTotalCentavos} does not match calculated PO total ${calculatedTotalCentavos}`;
+      const conflicts = Array.from(new Set([...(learned.conflicts || []), conflict]));
+      const { error: reviewError } = await supabase
+        .from("source_documents")
+        .update({ conflicts, human_review_required: true })
+        .eq("id", source.id);
+      if (reviewError) fail("Flag PO total conflict", reviewError);
+      source = { ...source, conflicts, human_review_required: true };
+    }
     if (!po) {
       const { data, error } = await supabase
         .from("purchase_orders")
         .insert({
-          po_number: learned.reference,
+          po_number: normalizedReference,
           customer_id: customer?.id || null,
           project_id: project?.id || null,
           po_date: learned.docDate || null,
           currency: "PHP",
-          total_centavos: learned.totalCentavos || 0,
+          total_centavos: documentTotalCentavos,
           terms: learned.paymentTerms || null,
           status: "RECEIVED",
-          comparison: {
-            source: "DOCUMENT_INGESTION",
-            mrsNumber: learned.mrsNumber,
-            expectedDate: learned.expectedDate,
-            memo: learned.memo,
-            transactionId: learned.transactionId,
-          },
+          comparison,
           source_document_id: source.id,
           created_by: user.id,
         })
@@ -243,13 +333,20 @@ export async function learnCommercialDocument(clientDocumentId: string, learned:
         .single();
       if (error) fail("Create purchase order", error);
       po = data;
-    } else if (po.source_document_id !== source.id) {
+    } else {
       const { data, error } = await supabase
         .from("purchase_orders")
         .update({
+          po_number: normalizedReference,
           source_document_id: source.id,
           customer_id: po.customer_id || customer?.id || null,
           project_id: po.project_id || project?.id || null,
+          po_date: learned.docDate || po.po_date || null,
+          terms: learned.paymentTerms || po.terms || null,
+          total_centavos: documentTotalCentavos,
+          currency: po.currency || "PHP",
+          status: "RECEIVED",
+          comparison,
         })
         .eq("id", po.id)
         .select("*")
@@ -258,7 +355,7 @@ export async function learnCommercialDocument(clientDocumentId: string, learned:
       po = data;
     }
     if (po) {
-      const rows = learned.lines.map((l) => ({
+      const rows = normalizedLines.map(({ line: l, quantity, unitPrice, amount }) => ({
         purchase_order_id: po.id,
         line_no: l.lineNo,
         description: l.rawDescription,
@@ -276,11 +373,11 @@ export async function learnCommercialDocument(clientDocumentId: string, learned:
         raw_dimensions: l.rawDimensions || null,
         hardware: l.hardware || [],
         class: l.class || null,
-        quantity: l.quantity,
-        unit: l.unit,
-        unit_price_centavos: l.unitPriceCentavos || 0,
+        quantity,
+        unit: l.unit || "set",
+        unit_price_centavos: unitPrice,
         vat_centavos: l.vatCentavos || 0,
-        amount_centavos: l.amountCentavos || 0,
+        amount_centavos: amount,
         source_document_id: source.id,
         confidence: l.confidence ?? 1,
         human_review_required: l.humanReviewRequired ?? false,
@@ -289,9 +386,9 @@ export async function learnCommercialDocument(clientDocumentId: string, learned:
         const { error } = await supabase.from("purchase_order_lines").insert(rows);
         if (error) fail("Create PO line memory", error);
       }
-      const items = learned.lines
-        .filter((l) => l.productFamily)
-        .map((l) => ({
+      const items = normalizedLines
+        .filter(({ line }) => line.productFamily)
+        .map(({ line: l, quantity, unitPrice }) => ({
           customer_id: customer?.id || null,
           project_id: project?.id || null,
           purchase_order_id: po.id,
@@ -305,8 +402,8 @@ export async function learnCommercialDocument(clientDocumentId: string, learned:
           frame_color: l.frameColor || null,
           width_mm: l.widthMm || null,
           height_mm: l.heightMm || null,
-          quantity: l.quantity,
-          unit_price_centavos: l.unitPriceCentavos || null,
+          quantity,
+          unit_price_centavos: unitPrice,
           currency: "PHP",
           purchased_on: learned.docDate || null,
           source_reference: learned.reference,
@@ -317,9 +414,9 @@ export async function learnCommercialDocument(clientDocumentId: string, learned:
         const { error } = await supabase.from("items_purchased").insert(items);
         if (error) fail("Create purchased-item memory", error);
       }
-      const evidence = learned.lines
-        .filter((l) => l.productFamily)
-        .map((l) => ({
+      const evidence = normalizedLines
+        .filter(({ line }) => line.productFamily)
+        .map(({ line: l, quantity, unitPrice, amount }) => ({
           customer_name: learned.buyer?.name || null,
           project_name: learned.project?.name || null,
           location: learned.project?.location || null,
@@ -338,9 +435,9 @@ export async function learnCommercialDocument(clientDocumentId: string, learned:
           frame_color: l.frameColor || null,
           width_mm: l.widthMm || null,
           height_mm: l.heightMm || null,
-          quantity: l.quantity,
-          historical_unit_price_centavos: l.unitPriceCentavos || null,
-          historical_line_amount_centavos: l.amountCentavos || null,
+          quantity,
+          historical_unit_price_centavos: unitPrice,
+          historical_line_amount_centavos: amount,
           currency: "PHP",
           included_services: [],
           pricing_type: "HISTORICAL_EVIDENCE",
@@ -373,6 +470,8 @@ export async function learnCommercialDocument(clientDocumentId: string, learned:
         if (error) fail("Create document adjustments", error);
       }
     }
+  } else {
+    await resetPriorExtraction(source.id);
   }
   return {
     sourceDocument: source,

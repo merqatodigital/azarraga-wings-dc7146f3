@@ -1,6 +1,13 @@
 import { supabase } from "@/integrations/supabase/client";
 import { extractCommercialDocument } from "@/lib/agent.functions";
 import { learnCommercialDocument, type LearnedDocument } from "@/lib/document-learning";
+import {
+  calculateQuoteCommercialTotal,
+  copyQuoteLinesToPurchaseOrder,
+  normalizePurchaseOrderNumber,
+  purchaseOrderComparison,
+  purchaseOrderLineSubtotal,
+} from "@/lib/purchase-order";
 
 export type LeadDraft = {
   project: string;
@@ -74,17 +81,15 @@ export async function createLeadWorkflow(input: LeadDraft) {
     .single();
   if (error) fail("Create lead", error);
   if (input.customerName?.trim()) {
-    const { error: contactError } = await supabase
-      .from("contacts")
-      .insert({
-        name: input.customerName.trim(),
-        email: input.email || null,
-        phone: input.phone || null,
-        lead_id: lead.id,
-        customer_id: customerId,
-        role: "Client",
-        created_by: user.id,
-      });
+    const { error: contactError } = await supabase.from("contacts").insert({
+      name: input.customerName.trim(),
+      email: input.email || null,
+      phone: input.phone || null,
+      lead_id: lead.id,
+      customer_id: customerId,
+      role: "Client",
+      created_by: user.id,
+    });
     if (contactError) fail("Create contact", contactError);
   }
   return lead;
@@ -244,44 +249,121 @@ export async function createPOWorkflow(quoteId: string, poNumber: string) {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) throw new Error("Sign in required");
+  const normalizedPoNumber = normalizePurchaseOrderNumber(poNumber);
   const { data: q, error: e } = await supabase
     .from("quotes")
     .select("*,quote_lines(*)")
     .eq("id", quoteId)
     .single();
   if (e) fail("Load quote", e);
+  if (!q) throw new Error("Quotation was not found");
   if (q.status !== "APPROVED") throw new Error("Quote must be approved before PO entry");
+  const quoteLines = [...(q.quote_lines || [])].sort(
+    (a: any, b: any) => Number(a.line_no || 0) - Number(b.line_no || 0),
+  );
+  const preparedLines = copyQuoteLinesToPurchaseOrder("pending", quoteLines);
+  const copiedLineSubtotal = purchaseOrderLineSubtotal(preparedLines);
+  const calculatedQuoteTotal = calculateQuoteCommercialTotal(q);
+  const comparison = purchaseOrderComparison(
+    Number(q.subtotal_centavos || 0),
+    Number(q.total_centavos || 0),
+    copiedLineSubtotal,
+    calculatedQuoteTotal,
+  );
+  if (!comparison.lineSubtotalMatched || !comparison.totalMatched)
+    throw new Error(
+      "Approved quote totals do not match their deterministic line, tax and adjustment calculation. Review the quotation before receiving the PO.",
+    );
+
+  const { data: sameNumber, error: duplicateError } = await supabase
+    .from("purchase_orders")
+    .select("*")
+    .ilike("po_number", normalizedPoNumber)
+    .limit(2);
+  if (duplicateError) fail("Check PO number", duplicateError);
+  if ((sameNumber || []).some((existing: any) => existing.quote_id !== quoteId))
+    throw new Error(`Client PO ${normalizedPoNumber} is already linked to another quotation`);
+
+  const { data: quoteOrders, error: quoteOrderError } = await supabase
+    .from("purchase_orders")
+    .select("*")
+    .eq("quote_id", quoteId)
+    .limit(2);
+  if (quoteOrderError) fail("Check quotation PO", quoteOrderError);
+  const existingOrders = quoteOrders || [];
+  if (existingOrders.length > 1)
+    throw new Error("This quotation has duplicate purchase orders and requires owner review");
+  const existing = existingOrders[0];
+  if (existing) {
+    if (existing.po_number.toLocaleLowerCase() !== normalizedPoNumber.toLocaleLowerCase())
+      throw new Error(`This quotation already has client PO ${existing.po_number}`);
+    const { data: existingLines, error: existingLineError } = await supabase
+      .from("purchase_order_lines")
+      .select("line_no,description,quantity,unit,unit_price_centavos,amount_centavos")
+      .eq("purchase_order_id", existing.id)
+      .order("line_no");
+    if (existingLineError) fail("Verify existing PO lines", existingLineError);
+    if (existingLines?.length === preparedLines.length) {
+      const exact = existingLines.every((line: any, index: number) => {
+        const expected = preparedLines[index]!;
+        return (
+          Number(line.line_no) === expected.line_no &&
+          line.description === expected.description &&
+          Number(line.quantity) === expected.quantity &&
+          line.unit === expected.unit &&
+          Number(line.unit_price_centavos) === expected.unit_price_centavos &&
+          Number(line.amount_centavos) === expected.amount_centavos
+        );
+      });
+      if (!exact)
+        throw new Error(
+          "Existing PO lines differ from the approved quotation; owner review required",
+        );
+      return existing;
+    }
+    if (existingLines?.length)
+      throw new Error("Existing PO has an incomplete line copy; owner review required");
+    const { error: repairError } = await supabase
+      .from("purchase_order_lines")
+      .insert(preparedLines.map((line) => ({ ...line, purchase_order_id: existing.id })) as any);
+    if (repairError) fail("Repair PO lines", repairError);
+    const { error: repairHeaderError } = await supabase
+      .from("purchase_orders")
+      .update({ status: "RECEIVED", comparison })
+      .eq("id", existing.id);
+    if (repairHeaderError) fail("Repair PO status", repairHeaderError);
+    return existing;
+  }
+
   const { data: po, error } = await supabase
     .from("purchase_orders")
     .insert({
-      po_number: poNumber.trim(),
+      po_number: normalizedPoNumber,
       quote_id: q.id,
       project_id: q.project_id,
       customer_id: q.customer_id,
       status: "RECEIVED",
-      currency: "PHP",
+      currency: q.currency || "PHP",
       total_centavos: q.total_centavos,
       created_by: user.id,
-      comparison: { quoteTotalCentavos: q.total_centavos, matched: true },
+      comparison,
     })
     .select("*")
     .single();
   if (error) fail("Create PO", error);
-  if (q.quote_lines?.length) {
-    const { error: lineError } = await supabase
-      .from("purchase_order_lines")
-      .insert(
-        q.quote_lines.map((l: any, i: number) => ({
-          purchase_order_id: po.id,
-          line_no: i + 1,
-          description: l.description,
-          quantity: l.quantity,
-          unit: l.unit,
-          unit_price_centavos: l.unit_price_centavos,
-          amount_centavos: l.amount_centavos,
-        })),
-      );
-    if (lineError) fail("Create PO lines", lineError);
+  if (!po) throw new Error("Purchase order was not returned after saving");
+  const { error: lineError } = await supabase
+    .from("purchase_order_lines")
+    .insert(preparedLines.map((line) => ({ ...line, purchase_order_id: po.id })) as any);
+  if (lineError) {
+    await supabase
+      .from("purchase_orders")
+      .update({
+        status: "ERROR",
+        comparison: { ...comparison, persistenceError: lineError.message },
+      })
+      .eq("id", po.id);
+    fail("Create PO lines", lineError);
   }
   return po;
 }
@@ -323,19 +405,17 @@ export async function createInvoiceWorkflow(quoteId: string, poId?: string) {
     .single();
   if (error) fail("Create invoice", error);
   if (q.quote_lines?.length) {
-    const { error: lineError } = await supabase
-      .from("invoice_lines")
-      .insert(
-        q.quote_lines.map((l: any, n: number) => ({
-          invoice_id: i.id,
-          line_no: n + 1,
-          description: l.description,
-          quantity: l.quantity,
-          unit: l.unit,
-          unit_price_centavos: l.unit_price_centavos,
-          amount_centavos: l.amount_centavos,
-        })),
-      );
+    const { error: lineError } = await supabase.from("invoice_lines").insert(
+      q.quote_lines.map((l: any, n: number) => ({
+        invoice_id: i.id,
+        line_no: n + 1,
+        description: l.description,
+        quantity: l.quantity,
+        unit: l.unit,
+        unit_price_centavos: l.unit_price_centavos,
+        amount_centavos: l.amount_centavos,
+      })),
+    );
     if (lineError) fail("Create invoice lines", lineError);
   }
   return i;

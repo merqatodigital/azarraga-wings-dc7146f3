@@ -145,7 +145,8 @@ function WorkspaceApp() {
     [notice, setNotice] = useState(""),
     [quoteOpen, setQuoteOpen] = useState(false),
     [modal, setModal] = useState<any>(null),
-    [documentOpen, setDocumentOpen] = useState<any>(null);
+    [documentOpen, setDocumentOpen] = useState<any>(null),
+    [poOpen, setPoOpen] = useState<any>(null);
   const [leads, setLeads] = useState<any[]>([]),
     [quotes, setQuotes] = useState<any[]>([]),
     [invoices, setInvoices] = useState<any[]>([]),
@@ -159,7 +160,7 @@ function WorkspaceApp() {
       supabase.from("invoices").select("*").order("created_at", { ascending: false }).limit(50),
       supabase
         .from("purchase_orders")
-        .select("*")
+        .select("*,purchase_order_lines(*)")
         .order("created_at", { ascending: false })
         .limit(50),
       supabase
@@ -476,56 +477,78 @@ function WorkspaceApp() {
             }
           >
             <div className="space-y-3">
-              {quotes.map((q) => (
-                <div
-                  key={q.id}
-                  className="flex flex-wrap items-center gap-3 rounded-xl border bg-white p-5"
-                >
-                  <div className="min-w-[190px] flex-1">
-                    <b>{q.quote_number || "Draft"}</b>
-                    <small className="block text-slate-500">
-                      {q.customer_name} · {q.project_name}
-                    </small>
-                  </div>
-                  <strong>{peso(q.total_centavos)}</strong>
-                  <Badge>{q.status}</Badge>
-                  <button onClick={() => printQuote(q)} className="action">
-                    <Printer size={15} />
-                    Print
-                  </button>
-                  {q.status !== "APPROVED" ? (
-                    <button disabled={busy} onClick={() => approve(q)} className="action">
-                      <CheckCircle2 size={15} />
-                      Approve
+              {quotes.map((q) => {
+                const receivedPo = pos.find((p) => p.quote_id === q.id);
+                return (
+                  <div
+                    key={q.id}
+                    className="flex flex-wrap items-center gap-3 rounded-xl border bg-white p-5"
+                  >
+                    <div className="min-w-[190px] flex-1">
+                      <b>{q.quote_number || "Draft"}</b>
+                      <small className="block text-slate-500">
+                        {q.customer_name} · {q.project_name}
+                      </small>
+                    </div>
+                    <strong>{peso(q.total_centavos)}</strong>
+                    <Badge>{q.status}</Badge>
+                    <button onClick={() => printQuote(q)} className="action">
+                      <Printer size={15} />
+                      Print
                     </button>
-                  ) : (
-                    <>
-                      <button
-                        disabled={busy || pos.some((p) => p.quote_id === q.id)}
-                        onClick={() => setModal({ type: "po", q })}
-                        className="action"
-                      >
-                        <ShoppingCart size={15} />
-                        {pos.some((p) => p.quote_id === q.id) ? "PO received" : "Receive PO"}
+                    {q.status !== "APPROVED" ? (
+                      <button disabled={busy} onClick={() => approve(q)} className="action">
+                        <CheckCircle2 size={15} />
+                        Approve
                       </button>
-                      <button
-                        disabled={busy || invoices.some((i) => i.quote_id === q.id)}
-                        onClick={() =>
-                          run(
-                            () =>
-                              createInvoiceWorkflow(q.id, pos.find((p) => p.quote_id === q.id)?.id),
-                            "Invoice drafted",
-                            () => setTab("Invoices"),
-                          )
-                        }
-                        className="primary"
-                      >
-                        Draft invoice
-                      </button>
-                    </>
-                  )}
-                </div>
-              ))}
+                    ) : (
+                      <>
+                        <button
+                          disabled={busy || Boolean(receivedPo)}
+                          onClick={() => setModal({ type: "po", q })}
+                          className="action"
+                        >
+                          <ShoppingCart size={15} />
+                          {receivedPo ? "PO received" : "Receive PO"}
+                        </button>
+                        {receivedPo && (
+                          <button
+                            onClick={() =>
+                              setPoOpen({
+                                ...receivedPo,
+                                customer_name: q.customer_name,
+                                project_name: q.project_name,
+                                quote_number: q.quote_number,
+                              })
+                            }
+                            className="action"
+                          >
+                            <Eye size={15} />
+                            View PO
+                          </button>
+                        )}
+                        <button
+                          disabled={busy || invoices.some((i) => i.quote_id === q.id)}
+                          onClick={() =>
+                            run(
+                              () =>
+                                createInvoiceWorkflow(
+                                  q.id,
+                                  pos.find((p) => p.quote_id === q.id)?.id,
+                                ),
+                              "Invoice drafted",
+                              () => setTab("Invoices"),
+                            )
+                          }
+                          className="primary"
+                        >
+                          Draft invoice
+                        </button>
+                      </>
+                    )}
+                  </div>
+                );
+              })}
               {!quotes.length && <Empty text="No quotations yet." />}
             </div>
           </Page>
@@ -652,6 +675,7 @@ function WorkspaceApp() {
           run={run}
         />
       )}
+      {poOpen && <PurchaseOrderDetail po={poOpen} close={() => setPoOpen(null)} />}
     </div>
   );
 }
@@ -710,6 +734,130 @@ function ActionModal({ state, close, run }: any) {
         <button onClick={submit} className="primary mt-5 w-full justify-center">
           Save
         </button>
+      </div>
+    </div>
+  );
+}
+function PurchaseOrderDetail({ po, close }: any) {
+  const lines = [...(po.purchase_order_lines || [])].sort(
+    (a: any, b: any) => Number(a.line_no || 0) - Number(b.line_no || 0),
+  );
+  const copiedSubtotal = lines.reduce(
+    (sum: number, line: any) => sum + Number(line.amount_centavos || 0),
+    0,
+  );
+  const comparison = po.comparison || {};
+  return (
+    <div className="fixed inset-0 z-[75] overflow-y-auto bg-slate-950/70 p-4">
+      <div className="mx-auto max-w-7xl rounded-2xl bg-[#f6f8fb] shadow-2xl">
+        <header className="flex flex-wrap items-start justify-between gap-3 rounded-t-2xl border-b bg-white p-5">
+          <div>
+            <small className="font-bold tracking-[.16em] text-[#3972ae]">
+              PURCHASE ORDER / PERSISTED RECORD
+            </small>
+            <h2 className="text-2xl font-bold">{po.po_number}</h2>
+            <p className="text-sm text-slate-500">
+              {po.customer_name || "Customer unavailable"} ·{" "}
+              {po.project_name || "Project unavailable"}
+            </p>
+          </div>
+          <button onClick={close} className="rounded-lg border p-2">
+            <X size={18} />
+          </button>
+        </header>
+        <div className="space-y-4 p-4">
+          <section className="grid gap-3 rounded-xl border bg-white p-5 sm:grid-cols-2 lg:grid-cols-5">
+            <Meta label="PO number" value={po.po_number} />
+            <Meta label="Status" value={po.status} />
+            <Meta label="Quotation" value={po.quote_number || po.quote_id} />
+            <Meta label="PO date" value={po.po_date || "Not supplied"} />
+            <Meta label="Currency" value={po.currency} />
+            <Meta label="Terms" value={po.terms || "Not supplied"} />
+            <Meta label="Customer relationship" value={po.customer_id} />
+            <Meta label="Project relationship" value={po.project_id} />
+            <Meta label="Source document" value={po.source_document_id || "Approved quotation"} />
+            <Meta label="Persisted total" value={detailedMoney(po.total_centavos)} />
+          </section>
+          <section className="rounded-xl border bg-white p-5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <b>Deterministic persistence check</b>
+                <p className="text-xs text-slate-500">Saved rows reloaded from Supabase</p>
+              </div>
+              <Badge>
+                {comparison.lineSubtotalMatched !== false && comparison.totalMatched !== false
+                  ? "MATCHED"
+                  : "REVIEW REQUIRED"}
+              </Badge>
+            </div>
+            <div className="mt-3 grid gap-3 sm:grid-cols-3">
+              <Meta label="Copied line subtotal" value={detailedMoney(copiedSubtotal)} />
+              <Meta
+                label="Approved quote subtotal"
+                value={detailedMoney(comparison.quoteSubtotalCentavos)}
+              />
+              <Meta label="PO total" value={detailedMoney(po.total_centavos)} />
+            </div>
+          </section>
+          <section className="overflow-x-auto rounded-xl border bg-white">
+            <div className="border-b px-5 py-4">
+              <b>Persisted PO line items, dimensions, pricing and scope</b>
+            </div>
+            <table className="min-w-[1450px] w-full text-left text-xs">
+              <thead className="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500">
+                <tr>
+                  {[
+                    "Line",
+                    "Description / scope",
+                    "Product family",
+                    "System",
+                    "Quantity",
+                    "Unit",
+                    "Width mm",
+                    "Height mm",
+                    "Raw dimensions",
+                    "Glass",
+                    "Frame",
+                    "Unit price",
+                    "Line amount",
+                  ].map((heading) => (
+                    <th key={heading} className="whitespace-nowrap px-3 py-3">
+                      {heading}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {lines.map((line: any) => (
+                  <tr key={line.id || line.line_no} className="border-t align-top">
+                    <td className="px-3 py-3">{line.line_no}</td>
+                    <td className="min-w-72 whitespace-pre-wrap px-3 py-3 font-medium">
+                      {line.raw_description || line.description || "—"}
+                    </td>
+                    <td className="px-3 py-3">{line.product_family || "—"}</td>
+                    <td className="px-3 py-3">{line.system || "—"}</td>
+                    <td className="px-3 py-3">{line.quantity}</td>
+                    <td className="px-3 py-3">{line.unit}</td>
+                    <td className="px-3 py-3">{line.width_mm ?? "—"}</td>
+                    <td className="px-3 py-3">{line.height_mm ?? "—"}</td>
+                    <td className="px-3 py-3">{line.raw_dimensions || "—"}</td>
+                    <td className="px-3 py-3">{line.glass_type || "—"}</td>
+                    <td className="px-3 py-3">{line.frame_color || "—"}</td>
+                    <td className="whitespace-nowrap px-3 py-3">
+                      {detailedMoney(line.unit_price_centavos)}
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-3 font-bold">
+                      {detailedMoney(line.amount_centavos)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {!lines.length && (
+              <div className="p-5 text-sm text-red-700">No persisted PO line items were found.</div>
+            )}
+          </section>
+        </div>
       </div>
     </div>
   );
