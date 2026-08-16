@@ -26,8 +26,11 @@ import {
   ExternalLink,
   RotateCw,
   ShieldCheck,
+  Mail,
+  CircleDollarSign,
 } from "lucide-react";
 import { listAgentModels, askAgent } from "@/lib/agent.functions";
+import { TALA_QUICK_ACTIONS, type TalaIntent } from "@/lib/agent-quick-actions";
 import { supabase } from "@/integrations/supabase/client";
 import {
   createLeadWorkflow,
@@ -877,33 +880,59 @@ function PurchaseOrderDetail({ po, close }: any) {
 }
 function Agent({ onClose }: any) {
   const [msg, setMsg] = useState(""),
-    [reply, setReply] = useState(""),
-    [models, setModels] = useState<any[]>([]),
+    [messages, setMessages] = useState<any[]>([
+      {
+        role: "agent",
+        text: "Ready. Use a quick action or ask me about live Azarraga commercial records.",
+      },
+    ]),
+    [models, setModels] = useState<any[]>([
+      { id: "openrouter/free", name: "OpenRouter Free Router", free: true },
+    ]),
     [model, setModel] = useState("openrouter/free"),
-    [busy, setBusy] = useState(false);
+    [busy, setBusy] = useState(false),
+    [error, setError] = useState("");
   useEffect(() => {
     listAgentModels()
       .then((r: any) => {
-        setModels(r.models || []);
+        if (r.models?.length) setModels(r.models);
         if (r.models?.[0]?.id) setModel(r.models[0].id);
+        setError(r.error || "");
       })
-      .catch(() => setModels([{ id: "openrouter/free", name: "OpenRouter Free Router" }]));
+      .catch((reason: any) => setError(reason?.message || "Model discovery failed"));
   }, []);
-  const ask = async () => {
-    if (!msg.trim()) return;
+  const ask = async (text = msg, intent: TalaIntent = "general") => {
+    if (!text.trim() || busy) return;
+    setMessages((current) => [...current, { role: "user", text }]);
+    setMsg("");
     setBusy(true);
+    setError("");
     try {
-      const r: any = await askAgent({ data: { message: msg, model, intent: "general" } });
-      setReply(r.error || r.reply);
+      const r: any = await askAgent({ data: { message: text, model, intent } });
+      if (r.error) setError(r.error);
+      setMessages((current) => [
+        ...current,
+        { role: "agent", text: r.reply || r.error || "TALA returned no response." },
+      ]);
     } catch (e: any) {
-      setReply(e.message);
+      const detail = e?.message || "TALA request failed";
+      setError(detail);
+      setMessages((current) => [...current, { role: "agent", text: detail }]);
     } finally {
       setBusy(false);
     }
   };
+  const quickIcons: Record<string, any> = {
+    leads: Search,
+    email: Mail,
+    accounts: Users,
+    owed: CircleDollarSign,
+    documents: FileSearch,
+    pricing: ReceiptText,
+  };
   return (
-    <aside className="min-h-screen border-l bg-white p-5">
-      <div className="flex items-center justify-between">
+    <aside className="fixed inset-y-0 right-0 z-50 flex w-full max-w-[390px] flex-col border-l bg-white shadow-2xl lg:static lg:z-auto lg:min-h-screen lg:shadow-none">
+      <div className="flex items-center justify-between border-b p-5">
         <div className="flex items-center gap-3">
           <div className="rounded-xl bg-[#eaf3fc] p-2 text-[#0b5daf]">
             <Bot />
@@ -917,41 +946,75 @@ function Agent({ onClose }: any) {
           <X size={18} />
         </button>
       </div>
-      <div className="my-5 rounded-xl bg-[#f3f7fb] p-4 text-sm">
+      <div className="m-4 rounded-xl bg-[#f3f7fb] p-4 text-sm">
         <b>TALA</b>
         <p className="mt-1 text-slate-600">
           Ask about customers, product history, specifications, quotations, documents, invoices or
           Palawan opportunities.
         </p>
       </div>
-      <label className="text-xs font-bold">MODEL</label>
-      <select
-        value={model}
-        onChange={(e) => setModel(e.target.value)}
-        className="mt-1 w-full rounded-lg border p-2 text-sm"
-      >
-        {models.map((m) => (
-          <option key={m.id} value={m.id}>
-            {m.name}
-          </option>
+      <div className="px-4">
+        <label className="text-xs font-bold">OPENROUTER MODEL</label>
+        <select
+          value={model}
+          onChange={(e) => setModel(e.target.value)}
+          className="mt-1 w-full rounded-lg border p-2 text-sm"
+        >
+          {models.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.name}
+            </option>
+          ))}
+        </select>
+        {error && <p className="mt-2 rounded-lg bg-red-50 p-2 text-xs text-red-700">{error}</p>}
+      </div>
+      <div className="grid grid-cols-2 gap-2 p-4">
+        {TALA_QUICK_ACTIONS.map((action) => {
+          const Icon = quickIcons[action.id] || Sparkles;
+          return (
+            <button
+              key={action.id}
+              disabled={busy}
+              onClick={() => ask(action.prompt, action.intent)}
+              className="rounded-lg border p-3 text-left disabled:opacity-40"
+            >
+              <span className="flex items-center gap-2 text-xs font-bold">
+                <Icon size={14} className="text-[#0b5daf]" />
+                {action.label}
+              </span>
+              <small className="mt-1 block text-[10px] text-slate-500">{action.description}</small>
+            </button>
+          );
+        })}
+      </div>
+      <div className="flex-1 overflow-y-auto border-y p-4">
+        {messages.map((message, index) => (
+          <div
+            key={index}
+            className={`mb-2 max-w-[90%] whitespace-pre-wrap rounded-xl p-3 text-xs leading-5 ${message.role === "user" ? "ml-auto bg-[#0d3158] text-white" : "bg-slate-100"}`}
+          >
+            {message.text}
+          </div>
         ))}
-      </select>
-      {reply && (
-        <div className="mt-4 whitespace-pre-wrap rounded-xl border p-4 text-sm leading-6">
-          {reply}
-        </div>
-      )}
-      <div className="mt-4 flex gap-2">
+        {busy && <div className="rounded-xl bg-slate-100 p-3 text-xs">TALA is working…</div>}
+      </div>
+      <div className="grid grid-cols-[1fr_44px] gap-2 p-3">
         <textarea
           value={msg}
           onChange={(e) => setMsg(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              ask();
+            }
+          }}
           placeholder="Ask TALA…"
-          className="min-h-24 flex-1 rounded-xl border p-3 text-sm"
+          className="min-h-20 resize-none rounded-xl border p-3 text-sm"
         />
         <button
           disabled={busy}
-          onClick={ask}
-          className="self-end rounded-lg bg-[#0b5daf] p-3 text-white"
+          onClick={() => ask()}
+          className="self-end rounded-lg bg-[#0b5daf] p-3 text-white disabled:opacity-40"
         >
           <Send size={17} />
         </button>

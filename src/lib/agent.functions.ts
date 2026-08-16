@@ -2,6 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { supabase } from "@/integrations/supabase/client";
+import { TALA_INTENTS } from "@/lib/agent-quick-actions";
 
 const OPENROUTER_MODELS = "https://openrouter.ai/api/v1/models";
 const OPENROUTER_CHAT = "https://openrouter.ai/api/v1/chat/completions";
@@ -58,7 +59,7 @@ export const listAgentModels = createServerFn({ method: "GET" })
 const AskInput = z.object({
   message: z.string().min(1),
   model: z.string().min(1),
-  intent: z.enum(["leads", "quotes", "invoices", "icm", "documents", "general"]).default("general"),
+  intent: z.enum(TALA_INTENTS).default("general"),
 });
 const SYSTEM_RULES = `You are TALA, the Azarraga Commercial Agent for Azarraga Glass & Aluminum in Palawan, Philippines.
 Your jobs are FIND BUSINESS, WIN BUSINESS, UNDERSTAND THE CUSTOMER, UNDERSTAND THE JOB, and BILL BUSINESS.
