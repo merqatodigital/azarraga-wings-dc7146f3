@@ -61,6 +61,16 @@ const peso = (c: number) =>
     maximumFractionDigits: 0,
   }).format((c || 0) / 100);
 
+function openExternalDocument(url: string) {
+  const link = window.document.createElement("a");
+  link.href = url;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  window.document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
 function Home() {
   const [session, setSession] = useState<any>(undefined);
   useEffect(() => {
@@ -299,7 +309,10 @@ function WorkspaceApp() {
           {nav.map(([n, I]) => (
             <button
               key={n}
-              onClick={() => setTab(n)}
+              onClick={() => {
+                setNotice("");
+                setTab(n);
+              }}
               className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm ${tab === n ? "bg-[#102d50] text-white" : "text-[#9bacc0]"}`}
             >
               <I size={17} />
@@ -948,14 +961,10 @@ function Agent({ onClose }: any) {
 }
 function DocumentRow({ document, source, busy, open, run }: any) {
   const openOriginal = () => {
-    const popup = window.open("about:blank", "_blank");
     run(async () => {
       const url = await createCommercialDocumentSignedUrl(document);
-      if (popup) {
-        popup.opener = null;
-        popup.location.href = url;
-      } else window.location.href = url;
-    }, "Original opened").catch?.(() => popup?.close());
+      openExternalDocument(url);
+    }, "Original opened");
   };
   const status =
     source?.human_review_required || document.category === "needs_review"
@@ -1081,14 +1090,10 @@ function DocumentIntelligence({ document, source, busy, close, run }: any) {
   );
   const vat = lines.reduce((sum: number, line: any) => sum + Number(line.vatCentavos || 0), 0);
   const openOriginal = () => {
-    const popup = window.open("about:blank", "_blank");
     run(async () => {
       const fresh = await createCommercialDocumentSignedUrl(document, 120);
-      if (popup) {
-        popup.opener = null;
-        popup.location.href = fresh;
-      } else window.location.href = fresh;
-    }, "Original opened").catch?.(() => popup?.close());
+      openExternalDocument(fresh);
+    }, "Original opened");
   };
   return (
     <div className="fixed inset-0 z-[80] overflow-y-auto bg-slate-950/70 p-3 sm:p-6">
