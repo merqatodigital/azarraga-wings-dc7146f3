@@ -1,24 +1,6 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from '@tanstack/react-router'
+import { ArrowRight, FileText, Search, ReceiptText } from 'lucide-react'
 
-// No head() here: the home route inherits title/description/og/twitter from
-// __root.tsx, and ships no og:image so serve-time hosting can inject the
-// project's social preview (explicit og:image or latest screenshot).
-export const Route = createFileRoute("/")({
-  component: Index,
-});
+export const Route = createFileRoute('/')({ component: Home })
 
-// IMPORTANT: Replace this placeholder. See ./README.md for routing conventions.
-function Index() {
-  return (
-    <div
-      className="flex min-h-screen items-center justify-center"
-      style={{ backgroundColor: "#fcfbf8" }}
-    >
-      <img
-        data-lovable-blank-page-placeholder="REMOVE_THIS"
-        src="https://cdn.gpteng.co/blank-app-v1.svg"
-        alt="Your app will live here!"
-      />
-    </div>
-  );
-}
+function Home(){return <main className="min-h-screen bg-white text-slate-950"><header className="border-b"><div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-5"><div className="font-semibold tracking-tight">Azarraga Glass & Aluminum</div><Link to="/admin" className="rounded-lg bg-[#0F4C81] px-4 py-2 text-sm font-semibold text-white">Owner workspace</Link></div></header><section className="mx-auto max-w-7xl px-6 py-20 lg:py-28"><p className="text-sm font-semibold uppercase tracking-[.2em] text-[#0F4C81]">Palawan, Philippines</p><h1 className="mt-5 max-w-4xl text-5xl font-semibold tracking-tight sm:text-6xl">From opportunity to quotation to payment.</h1><p className="mt-6 max-w-2xl text-lg leading-8 text-slate-600">A commercial operating system for Azarraga Glass & Aluminum—built around one persistent commercial memory.</p><div className="mt-9 flex flex-wrap gap-3"><Link to="/admin" className="inline-flex items-center gap-2 rounded-xl bg-[#0F4C81] px-5 py-3 font-semibold text-white">Open Commercial Agent <ArrowRight size={18}/></Link></div><div className="mt-20 grid gap-5 md:grid-cols-3">{[[Search,'Find business','Capture and qualify Palawan opportunities.'],[FileText,'Win business','Build evidence-backed quotations with deterministic arithmetic.'],[ReceiptText,'Bill business','Carry approved commercial data into invoices and payments.']].map(([Icon,title,body]:any)=><div key={title} className="rounded-2xl border border-slate-200 p-6"><Icon className="text-[#0F4C81]"/><h2 className="mt-5 text-xl font-semibold">{title}</h2><p className="mt-2 leading-7 text-slate-600">{body}</p></div>)}</div></section></main>}
