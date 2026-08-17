@@ -660,7 +660,7 @@ export async function uploadCommercialDocument(
               ? "purchase_order"
               : undefined,
           reason,
-        ) as LearnedDocument,
+        ) as unknown as LearnedDocument,
       );
     } catch (reviewError) {
       console.error("[TALA review record]", reviewError);
