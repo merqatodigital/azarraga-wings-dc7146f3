@@ -74,3 +74,20 @@ test("PDF extraction uses OpenRouter's free file parser and preserves document s
   assert.match(agent, /never classify a customer purchase order as an invoice/);
   assert.match(agent, /expectedType/);
 });
+
+test("document admin can add, edit, save and delete learned records", () => {
+  assert.match(route, /Edit intelligence/);
+  assert.match(route, /Add line/);
+  assert.match(route, /Save corrections & teach TALA/);
+  assert.match(route, /deleteCommercialDocument/);
+  assert.match(workflow, /saveCommercialDocumentIntelligence/);
+  assert.match(workflow, /Delete learned document memory/);
+  assert.match(learning, /humanReviewed/);
+});
+
+test("private originals render through authenticated blob access instead of frame navigation", () => {
+  assert.match(workflow, /loadCommercialDocumentBlob/);
+  assert.match(route, /URL\.createObjectURL\(blob\)/);
+  assert.doesNotMatch(route, /openExternalDocument/);
+  assert.match(route, /authenticated private Storage access/);
+});

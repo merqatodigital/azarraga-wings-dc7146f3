@@ -589,10 +589,10 @@ export async function createCommercialDocumentSignedUrl(
   return data.signedUrl;
 }
 
-export async function downloadCommercialDocument(document: {
+/** Load a private original through the authenticated Supabase client for an inline blob preview. */
+export async function loadCommercialDocumentBlob(document: {
   bucket: string;
   storage_path: string;
-  title?: string | null;
 }) {
   const {
     data: { user },
@@ -601,7 +601,17 @@ export async function downloadCommercialDocument(document: {
   const { data, error } = await supabase.storage
     .from(document.bucket)
     .download(document.storage_path);
-  if (error) fail("Download original document", error);
+  if (error) fail("Load original document", error);
+  if (!data) throw new Error("Storage returned an empty document");
+  return data;
+}
+
+export async function downloadCommercialDocument(document: {
+  bucket: string;
+  storage_path: string;
+  title?: string | null;
+}) {
+  const data = await loadCommercialDocumentBlob(document);
   const url = URL.createObjectURL(data);
   const link = window.document.createElement("a");
   link.href = url;
@@ -610,6 +620,74 @@ export async function downloadCommercialDocument(document: {
   link.click();
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+export async function saveCommercialDocumentIntelligence(
+  document: any,
+  title: string,
+  learned: LearnedDocument,
+) {
+  if (!document?.id) throw new Error("Document record is missing");
+  if (!title.trim()) throw new Error("Document filename is required");
+  const { error: titleError } = await supabase
+    .from("client_documents")
+    .update({ title: title.trim() })
+    .eq("id", document.id);
+  if (titleError) fail("Update document filename", titleError);
+  const memory = await learnCommercialDocument(document.id, learned, { humanReviewed: true });
+  const { data: updated, error } = await supabase
+    .from("client_documents")
+    .update({ category: learned.docType })
+    .eq("id", document.id)
+    .select("*")
+    .single();
+  if (error) fail("Save reviewed document", error);
+  return { document: updated, memory };
+}
+
+/** Admin delete: remove the private original and only the memory derived from that source. */
+export async function deleteCommercialDocument(document: any) {
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) throw new Error("Sign in required");
+  if (!document?.id || !document?.bucket || !document?.storage_path)
+    throw new Error("Document record is incomplete");
+  const sourceId = document.source_document_id;
+  if (sourceId) {
+    const { data: learnedOrders, error: orderFindError } = await supabase
+      .from("purchase_orders")
+      .select("id")
+      .eq("source_document_id", sourceId);
+    if (orderFindError) fail("Find learned purchase orders", orderFindError);
+    const cleanup = await Promise.all([
+      supabase.from("commercial_evidence").delete().eq("source_document_id", sourceId),
+      supabase.from("items_purchased").delete().eq("source_document_id", sourceId),
+      supabase.from("purchase_order_lines").delete().eq("source_document_id", sourceId),
+      supabase.from("document_financial_adjustments").delete().eq("source_document_id", sourceId),
+    ]);
+    const cleanupError = cleanup.find((result) => result.error)?.error;
+    if (cleanupError) fail("Delete learned document memory", cleanupError);
+    for (const order of learnedOrders || []) {
+      const { error } = await supabase.from("purchase_orders").delete().eq("id", order.id);
+      if (error) fail("Delete learned purchase order", error);
+    }
+    const { error: sourceError } = await supabase
+      .from("source_documents")
+      .delete()
+      .eq("id", sourceId);
+    if (sourceError) fail("Delete document intelligence", sourceError);
+  }
+  const { error: recordError } = await supabase
+    .from("client_documents")
+    .delete()
+    .eq("id", document.id);
+  if (recordError) fail("Delete document record", recordError);
+  const { error: storageError } = await supabase.storage
+    .from(document.bucket)
+    .remove([document.storage_path]);
+  if (storageError) fail("Delete private original", storageError);
+  return { id: document.id };
 }
 
 /** Persist an owner-generated invoice PDF so it is visible in Documents and Overview. */

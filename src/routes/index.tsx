@@ -28,6 +28,8 @@ import {
   ShieldCheck,
   Mail,
   CircleDollarSign,
+  Pencil,
+  Trash2,
 } from "lucide-react";
 import {
   listAgentModels,
@@ -45,11 +47,13 @@ import {
   createInvoiceWorkflow,
   recordPaymentWorkflow,
   uploadCommercialDocument,
-  createCommercialDocumentSignedUrl,
   downloadCommercialDocument,
   archiveGeneratedInvoiceDocument,
   reprocessCommercialDocument,
   markCommercialDocumentReviewed,
+  loadCommercialDocumentBlob,
+  saveCommercialDocumentIntelligence,
+  deleteCommercialDocument,
   type QuoteDraft,
 } from "@/lib/commercial-workflow";
 import { QuoteBuilder } from "@/components/commercial/QuoteBuilder";
@@ -76,16 +80,6 @@ const peso = (c: number) =>
     currency: "PHP",
     maximumFractionDigits: 0,
   }).format((c || 0) / 100);
-
-function openExternalDocument(url: string) {
-  const link = window.document.createElement("a");
-  link.href = url;
-  link.target = "_blank";
-  link.rel = "noopener noreferrer";
-  window.document.body.appendChild(link);
-  link.click();
-  link.remove();
-}
 
 function Home() {
   const [session, setSession] = useState<any>(undefined);
@@ -1031,6 +1025,7 @@ function WorkspaceApp() {
                         source={source}
                         busy={busy}
                         open={() => setDocumentOpen({ document: d, source })}
+                        edit={() => setDocumentOpen({ document: d, source, edit: true })}
                         run={run}
                       />
                     );
@@ -1060,6 +1055,11 @@ function WorkspaceApp() {
           }
           busy={busy}
           close={() => setDocumentOpen(null)}
+          initialEdit={Boolean(documentOpen.edit)}
+          changed={() => {
+            setDocumentOpen(null);
+            load();
+          }}
           run={run}
         />
       )}
@@ -1506,15 +1506,11 @@ function Agent({ onClose }: any) {
     </aside>
   );
 }
-function DocumentRow({ document, source, busy, open, run }: any) {
-  const openOriginal = () => {
-    run(async () => {
-      const url = await createCommercialDocumentSignedUrl(document);
-      openExternalDocument(url);
-    }, "Original opened");
-  };
+function DocumentRow({ document, source, busy, open, edit, run }: any) {
   const status =
-    source?.human_review_required || document.category === "needs_review"
+    source?.human_review_required ||
+    document.category === "needs_review" ||
+    document.category === "invoice_needs_review"
       ? "NEEDS REVIEW"
       : document.category === "generated_invoice"
         ? "GENERATED"
@@ -1547,7 +1543,7 @@ function DocumentRow({ document, source, busy, open, run }: any) {
       </td>
       <td className="px-5 py-4">
         <div className="flex flex-wrap gap-2" onClick={(event) => event.stopPropagation()}>
-          <button onClick={openOriginal} className="action">
+          <button onClick={open} className="action">
             <ExternalLink size={14} />
             Open
           </button>
@@ -1562,14 +1558,24 @@ function DocumentRow({ document, source, busy, open, run }: any) {
             <Eye size={14} />
             Intelligence
           </button>
-          <button
-            disabled={busy}
-            onClick={() => run(() => reprocessCommercialDocument(document), "Document reprocessed")}
-            className="action"
-          >
-            <RotateCw size={14} />
-            Reprocess
-          </button>
+          {document.category !== "generated_invoice" && (
+            <>
+              <button disabled={busy} onClick={edit} className="action">
+                <Pencil size={14} />
+                Edit
+              </button>
+              <button
+                disabled={busy}
+                onClick={() =>
+                  run(() => reprocessCommercialDocument(document), "Document reprocessed")
+                }
+                className="action"
+              >
+                <RotateCw size={14} />
+                Reprocess
+              </button>
+            </>
+          )}
           {source?.human_review_required && (
             <button
               disabled={busy}
@@ -1582,6 +1588,24 @@ function DocumentRow({ document, source, busy, open, run }: any) {
               Review
             </button>
           )}
+          <button
+            disabled={busy}
+            onClick={() => {
+              if (
+                window.confirm(
+                  `Delete ${document.title || "this document"}, its private original, and all TALA memory learned only from it?`,
+                )
+              )
+                run(
+                  () => deleteCommercialDocument(document),
+                  "Document and learned memory deleted",
+                );
+            }}
+            className="action text-red-700"
+          >
+            <Trash2 size={14} />
+            Delete
+          </button>
         </div>
       </td>
     </tr>
@@ -1607,17 +1631,462 @@ function Meta({ label, value }: any) {
     </div>
   );
 }
-function DocumentIntelligence({ document, source, invoice, busy, close, run }: any) {
+
+function IntelligenceField({ label, value, onChange, type = "text", className = "" }: any) {
+  return (
+    <label className={className}>
+      <small className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">
+        {label}
+      </small>
+      <input
+        type={type}
+        value={value ?? ""}
+        onChange={(event) => onChange(event.target.value)}
+        className="w-full rounded-lg border bg-white px-3 py-2 text-sm"
+      />
+    </label>
+  );
+}
+
+function DocumentIntelligenceEditor({ document, source, busy, cancel, save }: any) {
+  const initial = source?.extracted || {};
+  const [title, setTitle] = useState(document.title || ""),
+    [draft, setDraft] = useState<any>(() => ({
+      ...initial,
+      docType:
+        initial.docType ||
+        source?.doc_type ||
+        (String(document.category).includes("invoice") ? "invoice" : "unknown"),
+      reference: initial.reference || source?.reference || "",
+      docDate: initial.docDate || source?.doc_date || "",
+      paymentTerms: initial.paymentTerms || source?.payment_terms_raw || "",
+      memo: initial.memo || source?.memo || "",
+      instructions: initial.instructions || source?.instructions || "",
+      buyer: {
+        ...(initial.buyer || {}),
+        name: initial.buyer?.name || source?.buyer_name || source?.customer_name || "",
+        address: initial.buyer?.address || source?.buyer_address || "",
+        tin: initial.buyer?.tin || source?.buyer_tin || "",
+      },
+      supplier: {
+        ...(initial.supplier || {}),
+        name: initial.supplier?.name || source?.supplier_name || "",
+        address: initial.supplier?.address || source?.supplier_address || "",
+        contactPerson: initial.supplier?.contactPerson || source?.supplier_contact_person || "",
+        phone: initial.supplier?.phone || source?.supplier_phone || "",
+      },
+      project: {
+        ...(initial.project || {}),
+        name: initial.project?.name || source?.project_name || "",
+        location: initial.project?.location || source?.location || "",
+      },
+      lines: Array.isArray(initial.lines) ? initial.lines : [],
+      adjustments: Array.isArray(initial.adjustments) ? initial.adjustments : [],
+      missingInformation: Array.isArray(initial.missingInformation)
+        ? initial.missingInformation
+        : [],
+      conflicts: Array.isArray(initial.conflicts) ? initial.conflicts : [],
+    }));
+  const setValue = (key: string, value: any) =>
+    setDraft((current: any) => ({ ...current, [key]: value }));
+  const setGroup = (group: string, key: string, value: any) =>
+    setDraft((current: any) => ({
+      ...current,
+      [group]: { ...(current[group] || {}), [key]: value },
+    }));
+  const updateLine = (index: number, key: string, value: any) =>
+    setDraft((current: any) => ({
+      ...current,
+      lines: current.lines.map((line: any, lineIndex: number) =>
+        lineIndex === index ? { ...line, [key]: value } : line,
+      ),
+    }));
+  const addLine = () =>
+    setDraft((current: any) => ({
+      ...current,
+      lines: [
+        ...current.lines,
+        {
+          lineNo: current.lines.length + 1,
+          rawDescription: "",
+          quantity: 1,
+          unit: "SET",
+          hardware: [],
+          confidence: 1,
+          humanReviewRequired: false,
+        },
+      ],
+    }));
+  const removeLine = (index: number) =>
+    setDraft((current: any) => ({
+      ...current,
+      lines: current.lines
+        .filter((_: any, lineIndex: number) => lineIndex !== index)
+        .map((line: any, lineIndex: number) => ({ ...line, lineNo: lineIndex + 1 })),
+    }));
+  const numeric = (value: string) => (value === "" ? null : Number(value));
+  const submit = () => {
+    if (!title.trim()) return window.alert("Document filename is required");
+    if (!draft.docType) return window.alert("Document type is required");
+    const lines = draft.lines.map((line: any, index: number) => ({
+      ...line,
+      lineNo: index + 1,
+      rawDescription: String(line.rawDescription || "").trim(),
+      quantity: Number(line.quantity || 0),
+      unit: String(line.unit || "").trim(),
+      hardware: Array.isArray(line.hardware) ? line.hardware : [],
+      confidence: Number.isFinite(Number(line.confidence)) ? Number(line.confidence) : 1,
+      humanReviewRequired: false,
+    }));
+    if (lines.some((line: any) => !line.rawDescription))
+      return window.alert("Every line item needs a raw description");
+    save(title.trim(), { ...draft, lines });
+  };
+  return (
+    <div className="space-y-4">
+      <div className="rounded-xl border border-blue-200 bg-blue-50 p-4 text-sm text-[#24496d]">
+        <b>Edit and teach TALA.</b> Corrections below update the source document, customer account,
+        project and line-level commercial memory while keeping the private original unchanged.
+      </div>
+      <div className="grid gap-3 rounded-xl border bg-white p-5 md:grid-cols-2 lg:grid-cols-4">
+        <IntelligenceField
+          label="Filename"
+          value={title}
+          onChange={setTitle}
+          className="lg:col-span-2"
+        />
+        <label>
+          <small className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">
+            Document type
+          </small>
+          <select
+            value={draft.docType}
+            onChange={(event) => setValue("docType", event.target.value)}
+            className="w-full rounded-lg border bg-white px-3 py-2 text-sm"
+          >
+            {["purchase_order", "invoice", "quotation", "receipt", "supplier_quote", "unknown"].map(
+              (type) => (
+                <option key={type}>{type}</option>
+              ),
+            )}
+          </select>
+        </label>
+        <IntelligenceField
+          label="Reference / number"
+          value={draft.reference}
+          onChange={(v: string) => setValue("reference", v)}
+        />
+        <IntelligenceField
+          label="Document date"
+          type="date"
+          value={draft.docDate}
+          onChange={(v: string) => setValue("docDate", v)}
+        />
+        <IntelligenceField
+          label="Payment terms"
+          value={draft.paymentTerms}
+          onChange={(v: string) => setValue("paymentTerms", v)}
+        />
+        <IntelligenceField
+          label="Project"
+          value={draft.project?.name}
+          onChange={(v: string) => setGroup("project", "name", v)}
+        />
+        <IntelligenceField
+          label="Location"
+          value={draft.project?.location}
+          onChange={(v: string) => setGroup("project", "location", v)}
+        />
+      </div>
+      <div className="grid gap-3 lg:grid-cols-2">
+        <div className="grid gap-3 rounded-xl border bg-white p-5 sm:grid-cols-2">
+          <b className="sm:col-span-2">Buyer / customer account</b>
+          <IntelligenceField
+            label="Account name"
+            value={draft.buyer?.name}
+            onChange={(v: string) => setGroup("buyer", "name", v)}
+          />
+          <IntelligenceField
+            label="Business style"
+            value={draft.buyer?.businessStyle}
+            onChange={(v: string) => setGroup("buyer", "businessStyle", v)}
+          />
+          <IntelligenceField
+            label="Address"
+            value={draft.buyer?.address}
+            onChange={(v: string) => setGroup("buyer", "address", v)}
+            className="sm:col-span-2"
+          />
+          <IntelligenceField
+            label="TIN"
+            value={draft.buyer?.tin}
+            onChange={(v: string) => setGroup("buyer", "tin", v)}
+          />
+          <IntelligenceField
+            label="Contact person"
+            value={draft.buyer?.contactPerson}
+            onChange={(v: string) => setGroup("buyer", "contactPerson", v)}
+          />
+          <IntelligenceField
+            label="Email"
+            type="email"
+            value={draft.buyer?.email}
+            onChange={(v: string) => setGroup("buyer", "email", v)}
+          />
+          <IntelligenceField
+            label="Phone"
+            value={draft.buyer?.phone}
+            onChange={(v: string) => setGroup("buyer", "phone", v)}
+          />
+        </div>
+        <div className="grid gap-3 rounded-xl border bg-white p-5 sm:grid-cols-2">
+          <b className="sm:col-span-2">Supplier</b>
+          <IntelligenceField
+            label="Name"
+            value={draft.supplier?.name}
+            onChange={(v: string) => setGroup("supplier", "name", v)}
+          />
+          <IntelligenceField
+            label="TIN"
+            value={draft.supplier?.tin}
+            onChange={(v: string) => setGroup("supplier", "tin", v)}
+          />
+          <IntelligenceField
+            label="Address"
+            value={draft.supplier?.address}
+            onChange={(v: string) => setGroup("supplier", "address", v)}
+            className="sm:col-span-2"
+          />
+          <IntelligenceField
+            label="Contact"
+            value={draft.supplier?.contactPerson}
+            onChange={(v: string) => setGroup("supplier", "contactPerson", v)}
+          />
+          <IntelligenceField
+            label="Phone"
+            value={draft.supplier?.phone}
+            onChange={(v: string) => setGroup("supplier", "phone", v)}
+          />
+        </div>
+      </div>
+      <div className="rounded-xl border bg-white">
+        <div className="flex items-center justify-between border-b p-4">
+          <div>
+            <b>Line items</b>
+            <p className="text-xs text-slate-500">Add, correct or remove every learned item.</p>
+          </div>
+          <button type="button" onClick={addLine} className="primary">
+            <Plus size={15} /> Add line
+          </button>
+        </div>
+        <div className="space-y-3 p-4">
+          {draft.lines.map((line: any, index: number) => (
+            <div key={index} className="rounded-xl border bg-slate-50 p-4">
+              <div className="mb-3 flex items-center justify-between">
+                <b>Line {index + 1}</b>
+                <button
+                  type="button"
+                  onClick={() => removeLine(index)}
+                  className="action text-red-700"
+                >
+                  <Trash2 size={14} /> Remove
+                </button>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <IntelligenceField
+                  label="Opening code"
+                  value={line.openingCode}
+                  onChange={(v: string) => updateLine(index, "openingCode", v)}
+                />
+                <IntelligenceField
+                  label="Product family"
+                  value={line.productFamily}
+                  onChange={(v: string) => updateLine(index, "productFamily", v)}
+                />
+                <IntelligenceField
+                  label="System"
+                  value={line.system}
+                  onChange={(v: string) => updateLine(index, "system", v)}
+                />
+                <IntelligenceField
+                  label="Configuration"
+                  value={line.configuration}
+                  onChange={(v: string) => updateLine(index, "configuration", v)}
+                />
+                <IntelligenceField
+                  label="Raw description"
+                  value={line.rawDescription}
+                  onChange={(v: string) => updateLine(index, "rawDescription", v)}
+                  className="sm:col-span-2 lg:col-span-4"
+                />
+                <IntelligenceField
+                  label="Quantity"
+                  type="number"
+                  value={line.quantity}
+                  onChange={(v: string) => updateLine(index, "quantity", numeric(v))}
+                />
+                <IntelligenceField
+                  label="Unit"
+                  value={line.unit}
+                  onChange={(v: string) => updateLine(index, "unit", v)}
+                />
+                <IntelligenceField
+                  label="Width mm"
+                  type="number"
+                  value={line.widthMm}
+                  onChange={(v: string) => updateLine(index, "widthMm", numeric(v))}
+                />
+                <IntelligenceField
+                  label="Height mm"
+                  type="number"
+                  value={line.heightMm}
+                  onChange={(v: string) => updateLine(index, "heightMm", numeric(v))}
+                />
+                <IntelligenceField
+                  label="Raw dimensions"
+                  value={line.rawDimensions}
+                  onChange={(v: string) => updateLine(index, "rawDimensions", v)}
+                />
+                <IntelligenceField
+                  label="Glass thickness mm"
+                  type="number"
+                  value={line.glassThicknessMm}
+                  onChange={(v: string) => updateLine(index, "glassThicknessMm", numeric(v))}
+                />
+                <IntelligenceField
+                  label="Glass type"
+                  value={line.glassType}
+                  onChange={(v: string) => updateLine(index, "glassType", v)}
+                />
+                <IntelligenceField
+                  label="Glass color"
+                  value={line.glassColor}
+                  onChange={(v: string) => updateLine(index, "glassColor", v)}
+                />
+                <IntelligenceField
+                  label="Frame color"
+                  value={line.frameColor}
+                  onChange={(v: string) => updateLine(index, "frameColor", v)}
+                />
+                <IntelligenceField
+                  label="Hardware (comma separated)"
+                  value={Array.isArray(line.hardware) ? line.hardware.join(", ") : line.hardware}
+                  onChange={(v: string) =>
+                    updateLine(
+                      index,
+                      "hardware",
+                      v
+                        .split(",")
+                        .map((item) => item.trim())
+                        .filter(Boolean),
+                    )
+                  }
+                />
+                <IntelligenceField
+                  label="Class"
+                  value={line.class}
+                  onChange={(v: string) => updateLine(index, "class", v)}
+                />
+                <IntelligenceField
+                  label="Unit price PHP"
+                  type="number"
+                  value={line.unitPriceCentavos == null ? "" : Number(line.unitPriceCentavos) / 100}
+                  onChange={(v: string) =>
+                    updateLine(
+                      index,
+                      "unitPriceCentavos",
+                      v === "" ? null : Math.round(Number(v) * 100),
+                    )
+                  }
+                />
+                <IntelligenceField
+                  label="VAT PHP"
+                  type="number"
+                  value={line.vatCentavos == null ? "" : Number(line.vatCentavos) / 100}
+                  onChange={(v: string) =>
+                    updateLine(index, "vatCentavos", v === "" ? null : Math.round(Number(v) * 100))
+                  }
+                />
+                <IntelligenceField
+                  label="Line amount PHP"
+                  type="number"
+                  value={line.amountCentavos == null ? "" : Number(line.amountCentavos) / 100}
+                  onChange={(v: string) =>
+                    updateLine(
+                      index,
+                      "amountCentavos",
+                      v === "" ? null : Math.round(Number(v) * 100),
+                    )
+                  }
+                />
+              </div>
+            </div>
+          ))}
+          {!draft.lines.length && (
+            <Empty text="No lines yet. Select Add line to enter the first item." />
+          )}
+        </div>
+      </div>
+      <div className="grid gap-3 rounded-xl border bg-white p-5 md:grid-cols-2">
+        <label>
+          <small className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">
+            Memo
+          </small>
+          <textarea
+            value={draft.memo || ""}
+            onChange={(e) => setValue("memo", e.target.value)}
+            className="min-h-24 w-full rounded-lg border p-3 text-sm"
+          />
+        </label>
+        <label>
+          <small className="mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-500">
+            Instructions
+          </small>
+          <textarea
+            value={draft.instructions || ""}
+            onChange={(e) => setValue("instructions", e.target.value)}
+            className="min-h-24 w-full rounded-lg border p-3 text-sm"
+          />
+        </label>
+      </div>
+      <div className="sticky bottom-3 flex justify-end gap-2 rounded-xl border bg-white/95 p-3 shadow-lg backdrop-blur">
+        <button disabled={busy} onClick={cancel} className="action">
+          Cancel
+        </button>
+        <button disabled={busy} onClick={submit} className="primary">
+          <CheckCircle2 size={15} /> {busy ? "Saving…" : "Save corrections & teach TALA"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function DocumentIntelligence({
+  document,
+  source,
+  invoice,
+  busy,
+  close,
+  run,
+  initialEdit,
+  changed,
+}: any) {
   const [url, setUrl] = useState(""),
     [urlError, setUrlError] = useState(""),
     [loading, setLoading] = useState(false),
+    [editing, setEditing] = useState(Boolean(initialEdit)),
     [generatedLines, setGeneratedLines] = useState<any[]>([]),
     [generatedError, setGeneratedError] = useState("");
   const refreshOriginal = async () => {
     setLoading(true);
     setUrlError("");
     try {
-      setUrl(await createCommercialDocumentSignedUrl(document, 120));
+      const blob = await loadCommercialDocumentBlob(document);
+      const nextUrl = URL.createObjectURL(blob);
+      setUrl((current) => {
+        if (current) URL.revokeObjectURL(current);
+        return nextUrl;
+      });
     } catch (error: any) {
       setUrl("");
       setUrlError(error?.message || "Could not open the private original");
@@ -1628,6 +2097,12 @@ function DocumentIntelligence({ document, source, invoice, busy, close, run }: a
   useEffect(() => {
     refreshOriginal();
   }, [document.id]);
+  useEffect(
+    () => () => {
+      if (url) URL.revokeObjectURL(url);
+    },
+    [url],
+  );
   useEffect(() => {
     if (!invoice?.id) return setGeneratedLines([]);
     supabase
@@ -1653,12 +2128,7 @@ function DocumentIntelligence({ document, source, invoice, busy, close, run }: a
   );
   const vat = lines.reduce((sum: number, line: any) => sum + Number(line.vatCentavos || 0), 0);
   const financial = extracted.financialSummary || {};
-  const openOriginal = () => {
-    run(async () => {
-      const fresh = await createCommercialDocumentSignedUrl(document, 120);
-      openExternalDocument(fresh);
-    }, "Original opened");
-  };
+  const openOriginal = () => refreshOriginal();
   return (
     <div className="fixed inset-0 z-[80] overflow-y-auto bg-slate-950/70 p-3 sm:p-6">
       <div className="mx-auto max-w-[1700px] rounded-2xl bg-[#f6f8fb] shadow-2xl">
@@ -1671,7 +2141,7 @@ function DocumentIntelligence({ document, source, invoice, busy, close, run }: a
             </small>
             <h2 className="text-xl font-bold">{document.title || "Commercial document"}</h2>
             <p className="text-xs text-slate-500">
-              Original source beside TALA extraction · private signed access refreshes on demand
+              Original source beside TALA extraction · authenticated private Storage access
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -1685,6 +2155,31 @@ function DocumentIntelligence({ document, source, invoice, busy, close, run }: a
             >
               <Download size={15} />
               Download
+            </button>
+            {!invoice && (
+              <button disabled={busy} onClick={() => setEditing(true)} className="action">
+                <Pencil size={15} />
+                Edit intelligence
+              </button>
+            )}
+            <button
+              disabled={busy}
+              onClick={() => {
+                if (
+                  window.confirm(
+                    `Delete ${document.title || "this document"}, its private original, and all TALA memory learned only from it?`,
+                  )
+                )
+                  run(
+                    () => deleteCommercialDocument(document),
+                    "Document and learned memory deleted",
+                    changed,
+                  );
+              }}
+              className="action text-red-700"
+            >
+              <Trash2 size={15} />
+              Delete
             </button>
             {!invoice && (
               <button
@@ -1732,7 +2227,7 @@ function DocumentIntelligence({ document, source, invoice, busy, close, run }: a
               <div className="m-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
                 {urlError}
                 <button onClick={refreshOriginal} className="mt-3 block font-bold underline">
-                  Generate a new signed URL
+                  Reload the private original
                 </button>
               </div>
             ) : url && document.mime_type?.startsWith("image/") ? (
@@ -1756,7 +2251,21 @@ function DocumentIntelligence({ document, source, invoice, busy, close, run }: a
             )}
           </section>
           <section className="min-w-0 space-y-4">
-            {!source && invoice ? (
+            {editing && !invoice ? (
+              <DocumentIntelligenceEditor
+                document={document}
+                source={source}
+                busy={busy}
+                cancel={() => setEditing(false)}
+                save={(title: string, learned: any) =>
+                  run(
+                    () => saveCommercialDocumentIntelligence(document, title, learned),
+                    "Document corrections saved to TALA memory",
+                    changed,
+                  )
+                }
+              />
+            ) : !source && invoice ? (
               <>
                 <div className="grid gap-3 rounded-xl border bg-white p-5 sm:grid-cols-2 lg:grid-cols-4">
                   <Meta label="Filename" value={document.title} />

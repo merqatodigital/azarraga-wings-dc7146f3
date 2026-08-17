@@ -82,7 +82,11 @@ const fail = (label: string, e: any): never => {
 };
 
 /** Save a human-reviewed extraction and turn it into queryable TALA memory. The original file remains authoritative provenance. */
-export async function learnCommercialDocument(clientDocumentId: string, learned: LearnedDocument) {
+export async function learnCommercialDocument(
+  clientDocumentId: string,
+  learned: LearnedDocument,
+  options: { humanReviewed?: boolean } = {},
+) {
   const {
     data: { user },
   } = await supabase.auth.getUser();
@@ -133,17 +137,19 @@ export async function learnCommercialDocument(clientDocumentId: string, learned:
     buyer_address: learned.buyer?.address || null,
     buyer_tin: learned.buyer?.tin || null,
     instructions: learned.instructions || null,
-    ingestion_status: "LEARNED",
+    ingestion_status: options.humanReviewed ? "REVIEWED" : "LEARNED",
     extracted: learned,
     missing_information: learned.missingInformation || [],
     conflicts: learned.conflicts || [],
-    human_review_required: Boolean(
-      learned.missingInformation?.length ||
-      0 ||
-      learned.conflicts?.length ||
-      0 ||
-      learned.lines.some((x) => x.humanReviewRequired),
-    ),
+    human_review_required: options.humanReviewed
+      ? false
+      : Boolean(
+          learned.missingInformation?.length ||
+          0 ||
+          learned.conflicts?.length ||
+          0 ||
+          learned.lines.some((x) => x.humanReviewRequired),
+        ),
     extraction_version: "tala-document-v1",
     learned_at: new Date().toISOString(),
     created_by: user.id,
@@ -218,11 +224,21 @@ export async function learnCommercialDocument(clientDocumentId: string, learned:
       const { error } = await supabase
         .from("customers")
         .update({
-          company: customer.company || learned.buyer.businessStyle || learned.buyer.name,
-          billing_address: customer.billing_address || learned.buyer.address || null,
-          tin: customer.tin || learned.buyer.tin || null,
-          email: customer.email || learned.buyer.email || null,
-          phone: customer.phone || learned.buyer.phone || null,
+          company: options.humanReviewed
+            ? learned.buyer.businessStyle || learned.buyer.name
+            : customer.company || learned.buyer.businessStyle || learned.buyer.name,
+          billing_address: options.humanReviewed
+            ? learned.buyer.address || null
+            : customer.billing_address || learned.buyer.address || null,
+          tin: options.humanReviewed
+            ? learned.buyer.tin || null
+            : customer.tin || learned.buyer.tin || null,
+          email: options.humanReviewed
+            ? learned.buyer.email || null
+            : customer.email || learned.buyer.email || null,
+          phone: options.humanReviewed
+            ? learned.buyer.phone || null
+            : customer.phone || learned.buyer.phone || null,
         })
         .eq("id", customer.id);
       if (error) fail("Update customer account", error);
@@ -236,7 +252,16 @@ export async function learnCommercialDocument(clientDocumentId: string, learned:
         .limit(1)
         .maybeSingle();
       if (contactFindError) fail("Find customer contact", contactFindError);
-      if (!existingContact) {
+      if (existingContact && options.humanReviewed) {
+        const { error } = await supabase
+          .from("contacts")
+          .update({
+            email: learned.buyer.email || null,
+            phone: learned.buyer.phone || null,
+          })
+          .eq("id", existingContact.id);
+        if (error) fail("Update customer contact", error);
+      } else if (!existingContact) {
         const { error } = await supabase.from("contacts").insert({
           customer_id: customer.id,
           name: learned.buyer.contactPerson.trim(),
@@ -273,6 +298,15 @@ export async function learnCommercialDocument(clientDocumentId: string, learned:
         .select("*")
         .single();
       if (error) fail("Create project", error);
+      project = data;
+    } else if (options.humanReviewed) {
+      const { data, error } = await supabase
+        .from("projects")
+        .update({ location: learned.project.location || null })
+        .eq("id", project.id)
+        .select("*")
+        .single();
+      if (error) fail("Update project", error);
       project = data;
     }
   }
