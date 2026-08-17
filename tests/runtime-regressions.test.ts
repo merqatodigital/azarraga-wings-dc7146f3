@@ -156,3 +156,44 @@ test("document rows use focused actions while destructive tools remain in More a
   assert.match(route, /Delete document/);
   assert.match(route, /Products ordered \(\{lines\.length\}\)/);
 });
+
+test("lead customer data flows into a persisted quotation", () => {
+  const builder = readFileSync(
+    new URL("../src/components/commercial/QuoteBuilder.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(route, /Customer \/ business/);
+  assert.match(route, /Contact person/);
+  assert.match(route, /Create quote/);
+  assert.match(route, /leadId: lead\.id/);
+  assert.match(builder, /initial\?\.leadId/);
+  assert.match(builder, /Product family/);
+});
+
+test("quotes reload and expose every persisted product", () => {
+  const builder = readFileSync(
+    new URL("../src/components/commercial/QuoteBuilder.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(route, /select\("\*,quote_lines\(\*\)"\)/);
+  assert.match(builder, /Products and scope/);
+  assert.match(route, /quoteLines\.map/);
+  assert.match(route, /raw_description \|\| line\.description/);
+  assert.match(route, /quotedItems = quotes\.flatMap/);
+  assert.match(route, /commercialItems/);
+});
+
+test("approval and invoicing enforce the commercial sequence", () => {
+  assert.match(route, /Tax treatment/);
+  assert.doesNotMatch(route, /update\(\{ tax_treatment: "NONE"/);
+  assert.match(workflow, /Select tax treatment before approval/);
+  assert.match(workflow, /Receive the client purchase order before drafting an invoice/);
+  assert.match(workflow, /Quotation products no longer match the approved subtotal/);
+  assert.match(workflow, /Invoice .* already exists/);
+});
+
+test("uploaded invoice rows fall back to persisted learned products", () => {
+  assert.match(route, /persistedLearnedLines/);
+  assert.match(route, /learnedItems/);
+  assert.match(route, /issuedLines\.length/);
+});

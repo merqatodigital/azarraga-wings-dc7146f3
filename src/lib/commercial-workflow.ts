@@ -14,6 +14,7 @@ export type LeadDraft = {
   location: string;
   projectType: string;
   customerName?: string;
+  contactName?: string;
   email?: string;
   phone?: string;
   notes?: string;
@@ -48,22 +49,33 @@ export async function createLeadWorkflow(input: LeadDraft) {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) throw new Error("Sign in required");
+  if (!input.project.trim()) throw new Error("Project or opportunity name is required");
   let customerId: string | null = null;
   if (input.customerName?.trim()) {
-    const { data: c, error } = await supabase
+    const { data: existingCustomer, error: findCustomerError } = await supabase
       .from("customers")
-      .insert({
-        name: input.customerName.trim(),
-        email: input.email || null,
-        phone: input.phone || null,
-        project_address: input.location,
-        notes: input.notes || null,
-        created_by: user.id,
-      })
       .select("id")
-      .single();
-    if (error) fail("Create customer", error);
-    customerId = c.id;
+      .ilike("name", input.customerName.trim())
+      .limit(1)
+      .maybeSingle();
+    if (findCustomerError) fail("Find customer", findCustomerError);
+    if (existingCustomer) customerId = existingCustomer.id;
+    else {
+      const { data: c, error } = await supabase
+        .from("customers")
+        .insert({
+          name: input.customerName.trim(),
+          email: input.email || null,
+          phone: input.phone || null,
+          project_address: input.location,
+          notes: input.notes || null,
+          created_by: user.id,
+        })
+        .select("id")
+        .single();
+      if (error) fail("Create customer", error);
+      customerId = c.id;
+    }
   }
   const { data: lead, error } = await supabase
     .from("leads")
@@ -80,9 +92,9 @@ export async function createLeadWorkflow(input: LeadDraft) {
     .select("*")
     .single();
   if (error) fail("Create lead", error);
-  if (input.customerName?.trim()) {
+  if (input.customerName?.trim() && (input.contactName?.trim() || input.email || input.phone)) {
     const { error: contactError } = await supabase.from("contacts").insert({
-      name: input.customerName.trim(),
+      name: input.contactName?.trim() || input.customerName.trim(),
       email: input.email || null,
       phone: input.phone || null,
       lead_id: lead.id,
@@ -125,20 +137,32 @@ export async function createQuoteWorkflow(input: QuoteDraft) {
     if (error) fail("Create customer", error);
     customerId = c.id;
   }
-  const { data: p, error: pe } = await supabase
-    .from("projects")
-    .insert({
-      name: input.projectName.trim(),
-      location: input.location || null,
-      customer_id: customerId,
-      source_lead_id: input.leadId || null,
-      status: "QUOTING",
-      created_by: user.id,
-    })
-    .select("id")
-    .single();
-  if (pe) fail("Create project", pe);
-  projectId = p.id;
+  if (input.leadId) {
+    const { data: existingProject, error: projectFindError } = await supabase
+      .from("projects")
+      .select("id")
+      .eq("source_lead_id", input.leadId)
+      .limit(1)
+      .maybeSingle();
+    if (projectFindError) fail("Find lead project", projectFindError);
+    projectId = existingProject?.id || null;
+  }
+  if (!projectId) {
+    const { data: p, error: pe } = await supabase
+      .from("projects")
+      .insert({
+        name: input.projectName.trim(),
+        location: input.location || null,
+        customer_id: customerId,
+        source_lead_id: input.leadId || null,
+        status: "QUOTING",
+        created_by: user.id,
+      })
+      .select("id")
+      .single();
+    if (pe) fail("Create project", pe);
+    projectId = p.id;
+  }
   const { data: num, error: ne } = await supabase.rpc("next_quote_number");
   if (ne) fail("Quote number", ne);
   const subtotal = input.lines.reduce(
@@ -186,7 +210,10 @@ export async function createQuoteWorkflow(input: QuoteDraft) {
     pricing_status: "CURRENT_APPROVED",
   }));
   const { error: le } = await supabase.from("quote_lines").insert(rows);
-  if (le) fail("Create quote lines", le);
+  if (le) {
+    await supabase.from("quotes").delete().eq("id", q.id);
+    fail("Create quote lines", le);
+  }
   if (input.leadId)
     await supabase
       .from("leads")
@@ -199,7 +226,11 @@ export async function createQuoteWorkflow(input: QuoteDraft) {
   return q;
 }
 
-export async function approveQuoteWorkflow(quoteId: string) {
+export async function approveQuoteWorkflow(
+  quoteId: string,
+  taxTreatment?: "NONE" | "VAT_EXCLUSIVE" | "VAT_INCLUSIVE",
+  taxRateBasisPoints?: number,
+) {
   const {
     data: { user },
   } = await supabase.auth.getUser();
@@ -222,11 +253,22 @@ export async function approveQuoteWorkflow(quoteId: string) {
     Number(q.delivery_centavos || 0) +
     Number(q.installation_centavos || 0) -
     Number(q.discount_centavos || 0);
-  if (q.tax_treatment == null) throw new Error("Set tax treatment before approval");
-  const tax =
-    q.tax_rate_basis_points == null
+  const approvedTaxTreatment = taxTreatment || q.tax_treatment;
+  if (!approvedTaxTreatment) throw new Error("Select tax treatment before approval");
+  const approvedTaxRate =
+    approvedTaxTreatment === "NONE"
       ? 0
-      : Math.round(((subtotal + extras) * Number(q.tax_rate_basis_points)) / 10000);
+      : taxRateBasisPoints == null
+        ? Number(q.tax_rate_basis_points || 0)
+        : Number(taxRateBasisPoints);
+  if (!Number.isInteger(approvedTaxRate) || approvedTaxRate < 0 || approvedTaxRate > 10000)
+    throw new Error("Tax rate must be between 0% and 100%");
+  const tax =
+    approvedTaxTreatment === "VAT_INCLUSIVE"
+      ? 0
+      : approvedTaxRate == null
+        ? 0
+        : Math.round(((subtotal + extras) * approvedTaxRate) / 10000);
   const total = Math.max(0, subtotal + extras + tax);
   const { error } = await supabase
     .from("quotes")
@@ -234,6 +276,8 @@ export async function approveQuoteWorkflow(quoteId: string) {
       status: "APPROVED",
       subtotal_centavos: subtotal,
       tax_centavos: tax,
+      tax_treatment: approvedTaxTreatment,
+      tax_rate_basis_points: approvedTaxRate,
       total_centavos: total,
       approved_at: new Date().toISOString(),
       approved_by: user.id,
@@ -373,6 +417,7 @@ export async function createInvoiceWorkflow(quoteId: string, poId?: string) {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) throw new Error("Sign in required");
+  if (!poId) throw new Error("Receive the client purchase order before drafting an invoice");
   const { data: q, error: e } = await supabase
     .from("quotes")
     .select("*,quote_lines(*)")
@@ -380,6 +425,32 @@ export async function createInvoiceWorkflow(quoteId: string, poId?: string) {
     .single();
   if (e) fail("Load quote", e);
   if (q.status !== "APPROVED") throw new Error("Only approved quotes can be invoiced");
+  if (!q.quote_lines?.length) throw new Error("Cannot invoice a quotation with no products");
+  const calculatedSubtotal = q.quote_lines.reduce(
+    (sum: number, line: any) => sum + Number(line.amount_centavos || 0),
+    0,
+  );
+  if (calculatedSubtotal !== Number(q.subtotal_centavos || 0))
+    throw new Error("Quotation products no longer match the approved subtotal");
+  const { data: po, error: poError } = await supabase
+    .from("purchase_orders")
+    .select("id,quote_id,total_centavos,status")
+    .eq("id", poId)
+    .single();
+  if (poError) fail("Load client PO", poError);
+  if (po.quote_id !== quoteId || po.status !== "RECEIVED")
+    throw new Error("The selected purchase order is not the received PO for this quotation");
+  if (Number(po.total_centavos || 0) !== Number(q.total_centavos || 0))
+    throw new Error("Purchase order total does not match the approved quotation");
+  const { data: existingInvoice, error: existingInvoiceError } = await supabase
+    .from("invoices")
+    .select("invoice_number")
+    .eq("quote_id", quoteId)
+    .limit(1)
+    .maybeSingle();
+  if (existingInvoiceError) fail("Check existing invoice", existingInvoiceError);
+  if (existingInvoice)
+    throw new Error(`Invoice ${existingInvoice.invoice_number || "draft"} already exists`);
   const { data: num, error: ne } = await supabase.rpc("next_invoice_number");
   if (ne) fail("Invoice number", ne);
   const { data: i, error } = await supabase
@@ -387,7 +458,7 @@ export async function createInvoiceWorkflow(quoteId: string, poId?: string) {
     .insert({
       invoice_number: num,
       quote_id: q.id,
-      purchase_order_id: poId || null,
+      purchase_order_id: poId,
       project_id: q.project_id,
       customer_id: q.customer_id,
       customer_name: q.customer_name,
@@ -416,7 +487,10 @@ export async function createInvoiceWorkflow(quoteId: string, poId?: string) {
         amount_centavos: l.amount_centavos,
       })),
     );
-    if (lineError) fail("Create invoice lines", lineError);
+    if (lineError) {
+      await supabase.from("invoices").delete().eq("id", i.id);
+      fail("Create invoice lines", lineError);
+    }
   }
   return i;
 }

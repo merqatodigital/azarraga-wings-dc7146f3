@@ -174,6 +174,7 @@ function WorkspaceApp() {
     [busy, setBusy] = useState(false),
     [notice, setNotice] = useState(""),
     [quoteOpen, setQuoteOpen] = useState(false),
+    [quoteSeed, setQuoteSeed] = useState<any>(null),
     [modal, setModal] = useState<any>(null),
     [documentOpen, setDocumentOpen] = useState<any>(null),
     [poOpen, setPoOpen] = useState<any>(null);
@@ -190,7 +191,11 @@ function WorkspaceApp() {
   const load = async () => {
     const [l, q, i, invoiceLineRows, p, d, s, c, items, facts] = await Promise.all([
       supabase.from("leads").select("*").order("created_at", { ascending: false }).limit(50),
-      supabase.from("quotes").select("*").order("created_at", { ascending: false }).limit(50),
+      supabase
+        .from("quotes")
+        .select("*,quote_lines(*)")
+        .order("created_at", { ascending: false })
+        .limit(50),
       supabase.from("invoices").select("*").order("created_at", { ascending: false }).limit(50),
       supabase.from("invoice_lines").select("*").order("line_no").limit(500),
       supabase
@@ -246,6 +251,10 @@ function WorkspaceApp() {
   useEffect(() => {
     load();
   }, []);
+  const openQuote = (seed: any = null) => {
+    setQuoteSeed(seed);
+    setQuoteOpen(true);
+  };
   const run = async (fn: () => Promise<any>, ok: string, after?: () => void) => {
     setBusy(true);
     setNotice("");
@@ -295,20 +304,10 @@ function WorkspaceApp() {
       "Quotation saved with line items",
       () => {
         setQuoteOpen(false);
+        setQuoteSeed(null);
         setTab("Quotes");
       },
     );
-  const approve = async (q: any) =>
-    run(async () => {
-      if (q.tax_treatment == null) {
-        const { error } = await supabase
-          .from("quotes")
-          .update({ tax_treatment: "NONE", tax_rate_basis_points: 0 })
-          .eq("id", q.id);
-        if (error) throw error;
-      }
-      return approveQuoteWorkflow(q.id);
-    }, "Quotation approved");
   const printQuote = async (q: any) => {
     const { data, error } = await supabase
       .from("quote_lines")
@@ -378,8 +377,9 @@ function WorkspaceApp() {
       setBusy(false);
     }
   };
-  const due = invoices.reduce((s, x) => s + Number(x.balance_centavos || 0), 0),
-    pipeline = quotes.reduce((s, x) => s + Number(x.total_centavos || 0), 0),
+  const activeQuotes = quotes.filter((quote) => quote.status !== "APPROVED"),
+    due = invoices.reduce((s, x) => s + Number(x.balance_centavos || 0), 0),
+    pipeline = activeQuotes.reduce((s, x) => s + Number(x.total_centavos || 0), 0),
     learnedPoValue = pos
       .filter((x) => x.source_document_id)
       .reduce((sum, x) => sum + Number(x.total_centavos || 0), 0),
@@ -403,7 +403,28 @@ function WorkspaceApp() {
         const persistedInvoiceLines = operationalInvoice
           ? invoiceLines.filter((line) => line.invoice_id === operationalInvoice.id)
           : [];
-        const lines = extractedLines.length ? extractedLines : persistedInvoiceLines;
+        const persistedLearnedLines = source
+          ? learnedItems
+              .filter((line) => line.source_document_id === source.id)
+              .map((line) => ({
+                rawDescription: line.raw_description || line.description,
+                productFamily: line.product_family,
+                system: line.system,
+                configuration: line.configuration,
+                quantity: line.quantity,
+                unit: line.unit,
+                widthMm: line.width_mm,
+                heightMm: line.height_mm,
+                rawDimensions: line.raw_dimensions,
+                unitPriceCentavos: line.unit_price_centavos,
+                amountCentavos: line.amount_centavos,
+              }))
+          : [];
+        const lines = extractedLines.length
+          ? extractedLines
+          : persistedInvoiceLines.length
+            ? persistedInvoiceLines
+            : persistedLearnedLines;
         const account =
           source?.buyer_name ||
           source?.customer_name ||
@@ -462,7 +483,31 @@ function WorkspaceApp() {
       ),
     invoiceReviewCount = invoiceDocuments.filter(
       ({ source, status }) => source?.human_review_required || status === "NEEDS REVIEW",
-    ).length;
+    ).length,
+    quotedItems = quotes.flatMap((quote) =>
+      (quote.quote_lines || []).map((line: any) => ({
+        id: `quote-${line.id}`,
+        customer_name: quote.customer_name,
+        project_name: quote.project_name,
+        product_family: line.product_family,
+        quantity: line.quantity,
+        width_mm: line.width_mm,
+        height_mm: line.height_mm,
+        historical_unit_price_centavos: line.unit_price_centavos,
+        source_reference: quote.quote_number,
+        source_date: quote.created_at ? String(quote.created_at).slice(0, 10) : null,
+        raw: {
+          rawDescription: line.raw_description || line.description,
+          rawDimensions: line.raw_dimensions,
+          unit: line.unit,
+        },
+        origin: "Quotation",
+      })),
+    ),
+    commercialItems = [
+      ...quotedItems,
+      ...evidence.map((item) => ({ ...item, origin: "Document" })),
+    ];
   return (
     <div
       className={`min-h-screen bg-[#f6f8fb] text-[#14263d] lg:grid ${agentOpen ? "lg:grid-cols-[238px_minmax(0,1fr)_365px]" : "lg:grid-cols-[238px_minmax(0,1fr)]"}`}
@@ -525,7 +570,7 @@ function WorkspaceApp() {
             </button>
             <button
               disabled={busy}
-              onClick={() => setQuoteOpen(true)}
+              onClick={() => openQuote()}
               className="inline-flex items-center gap-2 rounded-lg bg-[#0b5daf] px-4 py-2 text-sm font-semibold text-white"
             >
               <Plus size={16} />
@@ -570,7 +615,7 @@ function WorkspaceApp() {
               <Stat
                 label="Quotes in pipeline"
                 value={peso(pipeline)}
-                meta={`${quotes.length} quotations`}
+                meta={`${activeQuotes.length} quotations awaiting approval`}
               />
               <Stat
                 label="Receivables"
@@ -581,16 +626,80 @@ function WorkspaceApp() {
             </div>
             <div className="grid gap-3 xl:grid-cols-[1.7fr_1fr]">
               <Panel title="Needs your attention">
+                {sources
+                  .filter((source) => source.human_review_required)
+                  .slice(0, 2)
+                  .map((source) => {
+                    const document = docs.find((item) => item.source_document_id === source.id);
+                    return (
+                      <button
+                        key={`source-${source.id}`}
+                        onClick={() =>
+                          document && setDocumentOpen({ document, source, edit: true })
+                        }
+                        className="block w-full text-left"
+                      >
+                        <Row
+                          icon={FileSearch}
+                          title={source.reference || "Document review"}
+                          sub={`${source.customer_name || "Account needs review"} · correct and teach TALA`}
+                          end="REVIEW"
+                        />
+                      </button>
+                    );
+                  })}
+                {quotes
+                  .filter((quote) => quote.status !== "APPROVED")
+                  .slice(0, 2)
+                  .map((quote) => (
+                    <button
+                      key={`quote-${quote.id}`}
+                      onClick={() => setTab("Quotes")}
+                      className="block w-full text-left"
+                    >
+                      <Row
+                        icon={FileText}
+                        title={quote.quote_number || "Quotation"}
+                        sub={`${quote.customer_name} · ${quote.project_name}`}
+                        end="APPROVE"
+                      />
+                    </button>
+                  ))}
+                {invoices
+                  .filter((invoice) => Number(invoice.balance_centavos || 0) > 0)
+                  .slice(0, 2)
+                  .map((invoice) => (
+                    <button
+                      key={`invoice-${invoice.id}`}
+                      onClick={() => setTab("Invoices")}
+                      className="block w-full text-left"
+                    >
+                      <Row
+                        icon={ReceiptText}
+                        title={invoice.invoice_number || "Invoice"}
+                        sub={`${invoice.customer_name} · balance ${peso(invoice.balance_centavos)}`}
+                        end="COLLECT"
+                      />
+                    </button>
+                  ))}
                 {leads.slice(0, 4).map((l) => (
-                  <Row
+                  <button
                     key={l.id}
-                    icon={Building2}
-                    title={l.project || "Opportunity"}
-                    sub={`${l.location || "Palawan"} · ${l.next_action || "Review next action"}`}
-                    end={`${l.score || 0}% fit`}
-                  />
+                    onClick={() => setTab("Leads")}
+                    className="block w-full text-left"
+                  >
+                    <Row
+                      icon={Building2}
+                      title={l.project || "Opportunity"}
+                      sub={`${l.location || "Palawan"} · ${l.next_action || "Review next action"}`}
+                      end={`${l.score || 0}% fit`}
+                    />
+                  </button>
                 ))}
-                {!leads.length && <Empty text="No leads yet." />}
+                {!leads.length &&
+                  !sources.some((source) => source.human_review_required) &&
+                  !activeQuotes.length &&
+                  !due && <Empty text="No commercial records require attention." />}
               </Panel>
               <Panel title="What are we doing?">
                 <Quick
@@ -603,7 +712,7 @@ function WorkspaceApp() {
                   icon={FileText}
                   title="Prepare a quotation"
                   sub="Build a real multi-line quotation"
-                  onClick={() => setQuoteOpen(true)}
+                  onClick={() => openQuote()}
                 />
                 <Quick
                   icon={ReceiptText}
@@ -644,9 +753,9 @@ function WorkspaceApp() {
                   meta={`${pos.filter((x) => x.source_document_id).length} document POs`}
                 />
                 <Stat
-                  label="Items learned"
-                  value={String(evidence.length)}
-                  meta={`${learnedItems.length} purchased-item records`}
+                  label="Commercial products"
+                  value={String(commercialItems.length)}
+                  meta={`${quotedItems.length} quoted · ${evidence.length} learned`}
                 />
                 <Stat
                   label="Review required"
@@ -740,7 +849,7 @@ function WorkspaceApp() {
                       </tr>
                     </thead>
                     <tbody>
-                      {evidence.slice(0, 8).map((item) => {
+                      {commercialItems.slice(0, 8).map((item) => {
                         const raw: any = item.raw || {};
                         return (
                           <tr key={item.id} className="border-t align-top">
@@ -773,7 +882,7 @@ function WorkspaceApp() {
                             <td className="px-3 py-3">
                               <b>{item.source_reference}</b>
                               <small className="block text-slate-500">
-                                {item.source_date || "Date unavailable"}
+                                {item.source_date || "Date unavailable"} · {item.origin}
                               </small>
                             </td>
                           </tr>
@@ -781,7 +890,7 @@ function WorkspaceApp() {
                       })}
                     </tbody>
                   </table>
-                  {!evidence.length && <Empty text="No item evidence learned yet." />}
+                  {!commercialItems.length && <Empty text="No quoted or learned products yet." />}
                 </div>
               </div>
             </div>
@@ -798,17 +907,65 @@ function WorkspaceApp() {
               </button>
             }
           >
-            <Table
-              heads={["Opportunity", "Location", "Type", "Stage", "Next action", "Fit"]}
-              rows={leads.map((l) => [
-                l.project || "—",
-                l.location || "—",
-                l.project_type || "—",
-                l.status || "—",
-                l.next_action || "—",
-                `${l.score || 0}%`,
-              ])}
-            />
+            <div className="overflow-x-auto rounded-xl border bg-white">
+              <table className="min-w-[950px] w-full text-left text-sm">
+                <thead className="bg-slate-50 text-xs text-slate-500">
+                  <tr>
+                    {[
+                      "Customer / opportunity",
+                      "Location",
+                      "Type",
+                      "Stage",
+                      "Next action",
+                      "Fit",
+                      "Action",
+                    ].map((heading) => (
+                      <th key={heading} className="px-4 py-3">
+                        {heading}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {leads.map((lead) => {
+                    const customer = customers.find((item) => item.id === lead.customer_id);
+                    return (
+                      <tr key={lead.id} className="border-t align-top">
+                        <td className="px-4 py-4">
+                          <b>{customer?.name || "Customer not named"}</b>
+                          <small className="block text-slate-500">
+                            {lead.project || "Opportunity"}
+                          </small>
+                        </td>
+                        <td className="px-4 py-4">{lead.location || "—"}</td>
+                        <td className="px-4 py-4">{lead.project_type || "—"}</td>
+                        <td className="px-4 py-4">
+                          <Badge>{lead.status || "NEW"}</Badge>
+                        </td>
+                        <td className="px-4 py-4">{lead.next_action || "Review"}</td>
+                        <td className="px-4 py-4">{lead.score || 0}%</td>
+                        <td className="px-4 py-4">
+                          <button
+                            onClick={() =>
+                              openQuote({
+                                leadId: lead.id,
+                                customerName: customer?.name || "",
+                                projectName: lead.project || "",
+                                location: lead.location || "Palawan",
+                              })
+                            }
+                            className="primary"
+                          >
+                            <FileText size={15} /> Create quote
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {!leads.length && <Empty text="No leads yet." />}
+            </div>
           </Page>
         )}
         {tab === "Quotes" && (
@@ -816,7 +973,7 @@ function WorkspaceApp() {
             title="Quotation workspace"
             text="Create, approve, print, receive PO and invoice from one commercial record."
             action={
-              <button onClick={() => setQuoteOpen(true)} className="primary">
+              <button onClick={() => openQuote()} className="primary">
                 <Plus size={16} />
                 New quote
               </button>
@@ -825,63 +982,49 @@ function WorkspaceApp() {
             <div className="space-y-3">
               {quotes.map((q) => {
                 const receivedPo = pos.find((p) => p.quote_id === q.id);
+                const issuedInvoice = invoices.find((invoice) => invoice.quote_id === q.id);
+                const quoteLines = [...(q.quote_lines || [])].sort(
+                  (a: any, b: any) => Number(a.line_no || 0) - Number(b.line_no || 0),
+                );
                 return (
-                  <div
-                    key={q.id}
-                    className="flex flex-wrap items-center gap-3 rounded-xl border bg-white p-5"
-                  >
-                    <div className="min-w-[190px] flex-1">
-                      <b>{q.quote_number || "Draft"}</b>
-                      <small className="block text-slate-500">
-                        {q.customer_name} · {q.project_name}
-                      </small>
-                    </div>
-                    <strong>{peso(q.total_centavos)}</strong>
-                    <Badge>{q.status}</Badge>
-                    <button onClick={() => printQuote(q)} className="action">
-                      <Printer size={15} />
-                      Print
-                    </button>
-                    {q.status !== "APPROVED" ? (
-                      <button disabled={busy} onClick={() => approve(q)} className="action">
-                        <CheckCircle2 size={15} />
-                        Approve
-                      </button>
-                    ) : (
-                      <>
+                  <div key={q.id} className="rounded-xl border bg-white p-5">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <div className="min-w-[220px] flex-1">
+                        <b>{q.quote_number || "Draft"}</b>
+                        <small className="block text-slate-500">
+                          {q.customer_name} · {q.project_name}
+                        </small>
+                        <small className="block text-slate-500">
+                          {quoteLines.length} product{quoteLines.length === 1 ? "" : "s"} ·{" "}
+                          {q.location || "Location not set"}
+                        </small>
+                      </div>
+                      <strong>{peso(q.total_centavos)}</strong>
+                      <Badge>{q.status}</Badge>
+                      {q.status !== "APPROVED" && (
                         <button
-                          disabled={busy || Boolean(receivedPo)}
-                          onClick={() => setModal({ type: "po", q })}
-                          className="action"
+                          disabled={busy}
+                          onClick={() => setModal({ type: "approve", q })}
+                          className="primary"
                         >
-                          <ShoppingCart size={15} />
-                          {receivedPo ? "PO received" : "Receive PO"}
+                          <CheckCircle2 size={15} /> Approve
                         </button>
-                        {receivedPo && (
-                          <button
-                            onClick={() =>
-                              setPoOpen({
-                                ...receivedPo,
-                                customer_name: q.customer_name,
-                                project_name: q.project_name,
-                                quote_number: q.quote_number,
-                              })
-                            }
-                            className="action"
-                          >
-                            <Eye size={15} />
-                            View PO
-                          </button>
-                        )}
+                      )}
+                      {q.status === "APPROVED" && !receivedPo && (
                         <button
-                          disabled={busy || invoices.some((i) => i.quote_id === q.id)}
+                          disabled={busy}
+                          onClick={() => setModal({ type: "po", q })}
+                          className="primary"
+                        >
+                          <ShoppingCart size={15} /> Receive PO
+                        </button>
+                      )}
+                      {receivedPo && !issuedInvoice && (
+                        <button
+                          disabled={busy}
                           onClick={() =>
                             run(
-                              () =>
-                                createInvoiceWorkflow(
-                                  q.id,
-                                  pos.find((p) => p.quote_id === q.id)?.id,
-                                ),
+                              () => createInvoiceWorkflow(q.id, receivedPo.id),
                               "Invoice drafted",
                               () => setTab("Invoices"),
                             )
@@ -890,8 +1033,73 @@ function WorkspaceApp() {
                         >
                           Draft invoice
                         </button>
-                      </>
-                    )}
+                      )}
+                      {issuedInvoice && <Badge>INVOICE {issuedInvoice.invoice_number}</Badge>}
+                      <details className="relative">
+                        <summary className="action cursor-pointer list-none">More actions</summary>
+                        <div className="absolute right-0 z-20 mt-2 grid min-w-44 gap-1 rounded-lg border bg-white p-2 shadow-xl">
+                          <button onClick={() => printQuote(q)} className="action justify-start">
+                            <Printer size={15} /> Print quotation
+                          </button>
+                          {receivedPo && (
+                            <button
+                              onClick={() =>
+                                setPoOpen({
+                                  ...receivedPo,
+                                  customer_name: q.customer_name,
+                                  project_name: q.project_name,
+                                  quote_number: q.quote_number,
+                                })
+                              }
+                              className="action justify-start"
+                            >
+                              <Eye size={15} /> View PO
+                            </button>
+                          )}
+                        </div>
+                      </details>
+                    </div>
+                    <div className="mt-4 overflow-x-auto rounded-lg border">
+                      <table className="min-w-[850px] w-full text-left text-xs">
+                        <thead className="bg-slate-50 text-[10px] uppercase text-slate-500">
+                          <tr>
+                            <th className="px-3 py-2">Product / raw scope</th>
+                            <th className="px-3 py-2">Family / system</th>
+                            <th className="px-3 py-2">Dimensions</th>
+                            <th className="px-3 py-2">Qty</th>
+                            <th className="px-3 py-2">Unit price</th>
+                            <th className="px-3 py-2">Amount</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {quoteLines.map((line: any) => (
+                            <tr key={line.id} className="border-t">
+                              <td className="whitespace-pre-wrap px-3 py-2">
+                                {line.raw_description || line.description || "—"}
+                              </td>
+                              <td className="px-3 py-2">
+                                {[line.product_family, line.system].filter(Boolean).join(" · ") ||
+                                  "—"}
+                              </td>
+                              <td className="px-3 py-2">
+                                {line.raw_dimensions ||
+                                  (line.width_mm && line.height_mm
+                                    ? `${line.width_mm} × ${line.height_mm} mm`
+                                    : "—")}
+                              </td>
+                              <td className="px-3 py-2">
+                                {line.quantity} {line.unit}
+                              </td>
+                              <td className="px-3 py-2">{peso(line.unit_price_centavos)}</td>
+                              <td className="px-3 py-2 font-bold">{peso(line.amount_centavos)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {!quoteLines.length && (
+                        <Empty text="This quotation has no persisted products and cannot progress." />
+                      )}
+                    </div>
                   </div>
                 );
               })}
@@ -1064,6 +1272,7 @@ function WorkspaceApp() {
                     (document) =>
                       document.invoice_id === i.id && document.category === "generated_invoice",
                   );
+                  const issuedLines = invoiceLines.filter((line) => line.invoice_id === i.id);
                   return (
                     <div
                       key={i.id}
@@ -1074,6 +1283,10 @@ function WorkspaceApp() {
                         <small className="block text-slate-500">
                           {i.customer_name} · {i.project_name}
                         </small>
+                        <small className="block text-slate-500">
+                          {issuedLines.length} product{issuedLines.length === 1 ? "" : "s"}
+                          {issuedLines[0]?.description ? ` · ${issuedLines[0].description}` : ""}
+                        </small>
                       </div>
                       <div>
                         <small className="block text-slate-500">Balance</small>
@@ -1081,23 +1294,6 @@ function WorkspaceApp() {
                       </div>
                       <Badge>{i.status}</Badge>
                       {archived && <Badge>ARCHIVED</Badge>}
-                      <button onClick={() => printInvoice(i)} className="action">
-                        <Printer size={15} />
-                        Print
-                      </button>
-                      <button disabled={busy} onClick={() => downloadInvoice(i)} className="action">
-                        <Download size={15} />
-                        {archived ? "Download & update PDF" : "Download PDF"}
-                      </button>
-                      {archived && (
-                        <button
-                          onClick={() => setDocumentOpen({ document: archived, source: null })}
-                          className="action"
-                        >
-                          <FileSearch size={15} />
-                          View in Documents
-                        </button>
-                      )}
                       <button
                         disabled={busy || Number(i.balance_centavos) <= 0}
                         onClick={() => setModal({ type: "payment", i })}
@@ -1105,6 +1301,30 @@ function WorkspaceApp() {
                       >
                         Record payment
                       </button>
+                      <details className="relative">
+                        <summary className="action cursor-pointer list-none">More actions</summary>
+                        <div className="absolute right-0 z-20 mt-2 grid min-w-52 gap-1 rounded-lg border bg-white p-2 shadow-xl">
+                          <button onClick={() => printInvoice(i)} className="action justify-start">
+                            <Printer size={15} /> Print invoice
+                          </button>
+                          <button
+                            disabled={busy}
+                            onClick={() => downloadInvoice(i)}
+                            className="action justify-start"
+                          >
+                            <Download size={15} />{" "}
+                            {archived ? "Download updated PDF" : "Download PDF"}
+                          </button>
+                          {archived && (
+                            <button
+                              onClick={() => setDocumentOpen({ document: archived, source: null })}
+                              className="action justify-start"
+                            >
+                              <FileSearch size={15} /> View in Documents
+                            </button>
+                          )}
+                        </div>
+                      </details>
                     </div>
                   );
                 })}
@@ -1181,7 +1401,11 @@ function WorkspaceApp() {
       <QuoteBuilder
         open={quoteOpen}
         busy={busy}
-        onClose={() => setQuoteOpen(false)}
+        initial={quoteSeed}
+        onClose={() => {
+          setQuoteOpen(false);
+          setQuoteSeed(null);
+        }}
         onSubmit={submitQuote}
       />
       {modal && <ActionModal state={modal} close={() => setModal(null)} run={run} />}{" "}
@@ -1217,23 +1441,61 @@ function WorkspaceApp() {
 function ActionModal({ state, close, run }: any) {
   const [a, setA] = useState(""),
     [b, setB] = useState("Palawan"),
-    [c, setC] = useState("");
+    [c, setC] = useState(""),
+    [customerName, setCustomerName] = useState(""),
+    [contactName, setContactName] = useState(""),
+    [email, setEmail] = useState(""),
+    [phone, setPhone] = useState(""),
+    [notes, setNotes] = useState(""),
+    [taxTreatment, setTaxTreatment] = useState<"NONE" | "VAT_EXCLUSIVE" | "VAT_INCLUSIVE">(
+      state.q?.tax_treatment || "VAT_EXCLUSIVE",
+    ),
+    [taxRate, setTaxRate] = useState(String(Number(state.q?.tax_rate_basis_points ?? 1200) / 100)),
+    [error, setError] = useState("");
   const submit = async () => {
-    if (state.type === "lead")
+    setError("");
+    if (state.type === "lead") {
+      if (!a.trim()) return setError("Project or opportunity name is required.");
       return run(
-        () => createLeadWorkflow({ project: a, location: b, projectType: c || "Commercial" }),
+        () =>
+          createLeadWorkflow({
+            project: a,
+            location: b,
+            projectType: c || "Commercial",
+            customerName,
+            contactName,
+            email,
+            phone,
+            notes,
+          }),
         "Lead created",
         close,
       );
-    if (state.type === "po")
+    }
+    if (state.type === "approve") {
+      const rate = taxTreatment === "NONE" ? 0 : Number(taxRate);
+      if (!Number.isFinite(rate) || rate < 0 || rate > 100)
+        return setError("Enter a tax rate from 0% to 100%.");
+      return run(
+        () => approveQuoteWorkflow(state.q.id, taxTreatment, Math.round(rate * 100)),
+        "Quotation approved with explicit tax treatment",
+        close,
+      );
+    }
+    if (state.type === "po") {
+      if (!a.trim()) return setError("Client PO number is required.");
       return run(() => createPOWorkflow(state.q.id, a), "PO received", close);
-    if (state.type === "payment")
+    }
+    if (state.type === "payment") {
+      if (!Number.isFinite(Number(a)) || Number(a) <= 0)
+        return setError("Enter a payment amount greater than zero.");
       return run(
         () =>
           recordPaymentWorkflow(state.i.id, Math.round(Number(a) * 100), b || "Bank transfer", c),
         "Payment recorded",
         close,
       );
+    }
   };
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/30 p-4">
@@ -1242,9 +1504,11 @@ function ActionModal({ state, close, run }: any) {
           <h3 className="text-xl font-bold">
             {state.type === "lead"
               ? "Add opportunity"
-              : state.type === "po"
-                ? "Receive purchase order"
-                : "Record payment"}
+              : state.type === "approve"
+                ? "Approve quotation"
+                : state.type === "po"
+                  ? "Receive purchase order"
+                  : "Record payment"}
           </h3>
           <button onClick={close}>
             <X />
@@ -1252,9 +1516,35 @@ function ActionModal({ state, close, run }: any) {
         </div>
         {state.type === "lead" ? (
           <>
+            <Field label="Customer / business" value={customerName} onChange={setCustomerName} />
             <Field label="Project / opportunity" value={a} onChange={setA} />
             <Field label="Location" value={b} onChange={setB} />
             <Field label="Project type" value={c} onChange={setC} />
+            <Field label="Contact person" value={contactName} onChange={setContactName} />
+            <Field label="Email" value={email} onChange={setEmail} type="email" />
+            <Field label="Phone" value={phone} onChange={setPhone} />
+            <Field label="Notes / next action" value={notes} onChange={setNotes} />
+          </>
+        ) : state.type === "approve" ? (
+          <>
+            <div className="mb-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-900">
+              Confirm tax before approval. Products and approved subtotal will not be changed.
+            </div>
+            <label className="mb-3 block">
+              <span className="mb-1 block text-xs font-semibold text-slate-600">Tax treatment</span>
+              <select
+                value={taxTreatment}
+                onChange={(event) => setTaxTreatment(event.target.value as any)}
+                className="w-full rounded-lg border bg-white px-3 py-2 text-sm"
+              >
+                <option value="VAT_EXCLUSIVE">VAT exclusive</option>
+                <option value="VAT_INCLUSIVE">VAT inclusive</option>
+                <option value="NONE">No tax</option>
+              </select>
+            </label>
+            {taxTreatment !== "NONE" && (
+              <Field label="Tax rate (%)" value={taxRate} onChange={setTaxRate} type="number" />
+            )}
           </>
         ) : state.type === "po" ? (
           <Field label="Client PO number" value={a} onChange={setA} />
@@ -1265,6 +1555,7 @@ function ActionModal({ state, close, run }: any) {
             <Field label="Reference" value={c} onChange={setC} />
           </>
         )}
+        {error && <p className="mt-3 rounded-lg bg-red-50 p-3 text-sm text-red-700">{error}</p>}
         <button onClick={submit} className="primary mt-5 w-full justify-center">
           Save
         </button>
