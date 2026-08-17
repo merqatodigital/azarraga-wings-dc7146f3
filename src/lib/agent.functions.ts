@@ -34,7 +34,10 @@ export function hasOpenRouterSessionKey() {
 }
 
 function serverKey(inputKey?: string) {
-  const configured = typeof process !== "undefined" ? process.env.OPENROUTER_API_KEY : undefined;
+  const configured =
+    typeof process !== "undefined"
+      ? (process.env as { OPENROUTER_API_KEY?: string }).OPENROUTER_API_KEY
+      : undefined;
   return normalizeOpenRouterApiKey(inputKey || configured);
 }
 
@@ -130,6 +133,9 @@ const ExtractInput = z.object({
   fileName: z.string().min(1),
   mimeType: z.string().min(1),
   dataUrl: z.string().min(1),
+  expectedType: z
+    .enum(["purchase_order", "invoice", "quotation", "receipt", "supplier_quote", "unknown"])
+    .optional(),
   apiKey: z.string().optional(),
 });
 
@@ -185,11 +191,17 @@ const extractCommercialDocumentServer = createServerFn({ method: "POST" })
           {
             role: "user",
             content: [
-              { type: "text", text: `Read ${data.fileName}. Extract every field and line item.` },
+              {
+                type: "text",
+                text: `Read ${data.fileName}. Extract every field and line item. The owner opened this from the ${data.expectedType || "general document"} intake. Use that only as context: preserve the document's actual semantics and never classify a customer purchase order as an invoice.`,
+              },
               media,
             ],
           },
         ],
+        ...(data.mimeType === "application/pdf"
+          ? { plugins: [{ id: "file-parser", pdf: { engine: "cloudflare-ai" } }] }
+          : {}),
         temperature: 0,
       }),
     });
@@ -210,7 +222,13 @@ const extractCommercialDocumentServer = createServerFn({ method: "POST" })
 export async function extractCommercialDocument({
   data,
 }: {
-  data: { fileName: string; mimeType: string; dataUrl: string };
+  data: {
+    fileName: string;
+    mimeType: string;
+    dataUrl: string;
+    expectedType?:
+      "purchase_order" | "invoice" | "quotation" | "receipt" | "supplier_quote" | "unknown";
+  };
 }) {
   return extractCommercialDocumentServer({ data: { ...data, apiKey: sessionKey() || undefined } });
 }

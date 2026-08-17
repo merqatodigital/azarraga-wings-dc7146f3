@@ -513,13 +513,30 @@ export async function uploadCommercialDocument(
   }
   try {
     const dataUrl = await fileToDataUrl(file);
+    const expectedType =
+      category === "invoice"
+        ? ("invoice" as const)
+        : category === "purchase_order"
+          ? ("purchase_order" as const)
+          : null;
     const learned = (await extractCommercialDocument({
-      data: { fileName: file.name, mimeType: file.type || "application/octet-stream", dataUrl },
+      data: {
+        fileName: file.name,
+        mimeType: file.type || "application/octet-stream",
+        dataUrl,
+        ...(expectedType ? { expectedType } : {}),
+      },
     })) as LearnedDocument;
     const memory = await learnCommercialDocument(data.id, learned);
-    await supabase.from("client_documents").update({ category: learned.docType }).eq("id", data.id);
+    const { data: updated, error: updateError } = await supabase
+      .from("client_documents")
+      .update({ category: learned.docType })
+      .eq("id", data.id)
+      .select("*")
+      .single();
+    if (updateError) fail("Update learned document", updateError);
     return {
-      ...data,
+      ...updated,
       learning: {
         status: "LEARNED",
         documentType: learned.docType,
@@ -534,10 +551,25 @@ export async function uploadCommercialDocument(
       },
     };
   } catch (e: any) {
-    await supabase.from("client_documents").update({ category: "needs_review" }).eq("id", data.id);
-    throw new Error(
-      `Document saved safely, but TALA learning needs review: ${e?.message || String(e)}`,
-    );
+    const failedCategory = category === "invoice" ? "invoice_needs_review" : "needs_review";
+    const { data: updated } = await supabase
+      .from("client_documents")
+      .update({ category: failedCategory })
+      .eq("id", data.id)
+      .select("*")
+      .single();
+    return {
+      ...(updated || data),
+      learning: {
+        status: "NEEDS_REVIEW",
+        documentType: category,
+        reference: null,
+        lines: 0,
+        humanReviewRequired: true,
+        memory: null,
+        error: `Document saved safely, but TALA learning needs review: ${e?.message || String(e)}`,
+      },
+    };
   }
 }
 
@@ -650,8 +682,19 @@ export async function reprocessCommercialDocument(document: any) {
     type: document.mime_type || data.type || "application/octet-stream",
   });
   const dataUrl = await fileToDataUrl(file);
+  const expectedType =
+    document.category === "invoice" || document.category === "invoice_needs_review"
+      ? ("invoice" as const)
+      : document.category === "purchase_order"
+        ? ("purchase_order" as const)
+        : null;
   const learned = (await extractCommercialDocument({
-    data: { fileName: file.name, mimeType: file.type, dataUrl },
+    data: {
+      fileName: file.name,
+      mimeType: file.type,
+      dataUrl,
+      ...(expectedType ? { expectedType } : {}),
+    },
   })) as LearnedDocument;
   const memory = await learnCommercialDocument(document.id, learned);
   const { error: updateError } = await supabase

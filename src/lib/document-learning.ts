@@ -593,6 +593,43 @@ export async function learnCommercialDocument(clientDocumentId: string, learned:
       const { error } = await supabase.from("commercial_evidence").insert(evidence);
       if (error) fail("Create document item evidence", error);
     }
+    if (learned.docType === "invoice" && learned.lines.length) {
+      const invoiceItems = learned.lines.map((line) => {
+        const quantity = Number.isFinite(Number(line.quantity)) ? Number(line.quantity) : 0;
+        const unitPrice = Number.isInteger(Number(line.unitPriceCentavos))
+          ? Number(line.unitPriceCentavos)
+          : null;
+        return {
+          customer_id: customer?.id || null,
+          project_id: project?.id || null,
+          purchase_order_id: null,
+          quote_id: null,
+          product_family: learnedProductFamily(line),
+          system: line.system || null,
+          description: line.rawDescription || null,
+          glass:
+            [
+              line.glassThicknessMm ? `${line.glassThicknessMm}mm` : null,
+              line.glassType,
+              line.glassColor,
+            ]
+              .filter(Boolean)
+              .join(" ") || null,
+          frame_color: line.frameColor || null,
+          width_mm: line.widthMm || null,
+          height_mm: line.heightMm || null,
+          quantity,
+          unit_price_centavos: unitPrice,
+          currency: "PHP",
+          purchased_on: learned.docDate || null,
+          source_reference: sourceReference || null,
+          source_document_id: source.id,
+          created_by: user.id,
+        };
+      });
+      const { error } = await supabase.from("items_purchased").insert(invoiceItems);
+      if (error) fail("Create invoice item memory", error);
+    }
   }
   return {
     sourceDocument: source,

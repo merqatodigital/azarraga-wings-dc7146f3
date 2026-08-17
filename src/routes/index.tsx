@@ -258,13 +258,23 @@ function WorkspaceApp() {
     try {
       const result: any = await uploadCommercialDocument(file, category);
       const learning = result?.learning;
-      const review = learning?.humanReviewRequired
-        ? " Human review required for uncertain fields."
-        : "";
-      setNotice(
-        `TALA learned ${learning?.lines ?? 0} line items from ${learning?.documentType ?? "document"}${learning?.reference ? ` ${learning.reference}` : ""}.${review}`,
-      );
+      if (learning?.status === "NEEDS_REVIEW") {
+        setNotice(learning.error || "Document saved, but extracted data needs review.");
+      } else {
+        const review = learning?.humanReviewRequired
+          ? " Human review required for uncertain fields."
+          : "";
+        setNotice(
+          `TALA learned ${learning?.lines ?? 0} line items from ${learning?.documentType ?? "document"}${learning?.reference ? ` ${learning.reference}` : ""}.${review}`,
+        );
+      }
       await load();
+      if (category === "invoice") {
+        setDocumentOpen({
+          document: result,
+          source: learning?.memory?.sourceDocument || null,
+        });
+      }
     } catch (e: any) {
       setNotice(e?.message || "Document upload or learning failed");
     } finally {
@@ -365,7 +375,18 @@ function WorkspaceApp() {
     learnedPoValue = pos
       .filter((x) => x.source_document_id)
       .reduce((sum, x) => sum + Number(x.total_centavos || 0), 0),
-    reviewCount = sources.filter((x) => x.human_review_required).length;
+    reviewCount = sources.filter((x) => x.human_review_required).length,
+    invoiceDocuments = docs
+      .map((document) => ({
+        document,
+        source: sources.find((source) => source.id === document.source_document_id),
+      }))
+      .filter(
+        ({ document, source }) =>
+          document.category === "invoice" ||
+          document.category === "invoice_needs_review" ||
+          source?.doc_type === "invoice",
+      );
   return (
     <div
       className={`min-h-screen bg-[#f6f8fb] text-[#14263d] lg:grid ${agentOpen ? "lg:grid-cols-[238px_minmax(0,1fr)_365px]" : "lg:grid-cols-[238px_minmax(0,1fr)]"}`}
@@ -826,57 +847,135 @@ function WorkspaceApp() {
               </label>
             }
           >
-            <div className="space-y-3">
-              {invoices.map((i) => {
-                const archived = docs.find(
-                  (document) =>
-                    document.invoice_id === i.id && document.category === "generated_invoice",
-                );
-                return (
-                  <div
-                    key={i.id}
-                    className="flex flex-wrap items-center gap-3 rounded-xl border bg-white p-5"
-                  >
-                    <div className="min-w-[190px] flex-1">
-                      <b>{i.invoice_number || "Draft"}</b>
-                      <small className="block text-slate-500">
-                        {i.customer_name} · {i.project_name}
-                      </small>
-                    </div>
-                    <div>
-                      <small className="block text-slate-500">Balance</small>
-                      <strong>{peso(i.balance_centavos)}</strong>
-                    </div>
-                    <Badge>{i.status}</Badge>
-                    {archived && <Badge>ARCHIVED</Badge>}
-                    <button onClick={() => printInvoice(i)} className="action">
-                      <Printer size={15} />
-                      Print
-                    </button>
-                    <button disabled={busy} onClick={() => downloadInvoice(i)} className="action">
-                      <Download size={15} />
-                      {archived ? "Download & update PDF" : "Download PDF"}
-                    </button>
-                    {archived && (
-                      <button
-                        onClick={() => setDocumentOpen({ document: archived, source: null })}
-                        className="action"
-                      >
-                        <FileSearch size={15} />
-                        View in Documents
-                      </button>
-                    )}
-                    <button
-                      disabled={busy || Number(i.balance_centavos) <= 0}
-                      onClick={() => setModal({ type: "payment", i })}
-                      className="primary"
-                    >
-                      Record payment
-                    </button>
+            <div className="space-y-6">
+              <section>
+                <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
+                  <div>
+                    <h3 className="font-bold">Uploaded invoice intelligence</h3>
+                    <p className="text-xs text-slate-500">
+                      Original invoice images and PDFs with account data, extracted totals and every
+                      learned item.
+                    </p>
                   </div>
-                );
-              })}
-              {!invoices.length && <Empty text="No invoices yet." />}
+                  <Badge>{invoiceDocuments.length} FILES</Badge>
+                </div>
+                <div className="grid gap-3 xl:grid-cols-2">
+                  {invoiceDocuments.map(({ document, source }) => {
+                    const extracted = source?.extracted || {};
+                    const extractedLines = Array.isArray(extracted.lines) ? extracted.lines : [];
+                    const total =
+                      extracted.financialSummary?.totalCentavos ?? extracted.totalCentavos ?? null;
+                    return (
+                      <button
+                        key={document.id}
+                        onClick={() => setDocumentOpen({ document, source })}
+                        className="rounded-xl border bg-white p-5 text-left transition hover:border-[#0F4C81] hover:shadow-sm"
+                      >
+                        <div className="flex items-start gap-3">
+                          <div className="rounded-lg bg-blue-50 p-2 text-[#0F4C81]">
+                            <ReceiptText size={20} />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <b className="truncate">{document.title || "Uploaded invoice"}</b>
+                              <Badge>
+                                {source?.ingestion_status ||
+                                  (document.category === "invoice_needs_review"
+                                    ? "NEEDS REVIEW"
+                                    : "STORED")}
+                              </Badge>
+                            </div>
+                            <p className="mt-1 text-xs text-slate-500">
+                              {source?.reference || "Reference not extracted"} ·{" "}
+                              {extractedLines.length} line items
+                            </p>
+                            <div className="mt-3 grid gap-2 text-xs sm:grid-cols-3">
+                              <span>
+                                <small className="block text-slate-400">Account</small>
+                                {source?.buyer_name || source?.customer_name || "Review required"}
+                              </span>
+                              <span>
+                                <small className="block text-slate-400">Project</small>
+                                {source?.project_name || "Not stated"}
+                              </span>
+                              <span>
+                                <small className="block text-slate-400">Total</small>
+                                <b>{total == null ? "Not extracted" : detailedMoney(total)}</b>
+                              </span>
+                            </div>
+                            <span className="mt-4 inline-flex items-center gap-1 text-xs font-bold text-[#0F4C81]">
+                              <Eye size={14} /> View original and all extracted data
+                            </span>
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                  {!invoiceDocuments.length && (
+                    <div className="rounded-xl border border-dashed bg-white p-8 text-center text-sm text-slate-400 xl:col-span-2">
+                      No invoice files uploaded yet. Upload an invoice image or PDF above.
+                    </div>
+                  )}
+                </div>
+              </section>
+              <section className="space-y-3">
+                <div>
+                  <h3 className="font-bold">Issued invoices and payments</h3>
+                  <p className="text-xs text-slate-500">
+                    Operational invoices created from approved quotations and purchase orders.
+                  </p>
+                </div>
+                {invoices.map((i) => {
+                  const archived = docs.find(
+                    (document) =>
+                      document.invoice_id === i.id && document.category === "generated_invoice",
+                  );
+                  return (
+                    <div
+                      key={i.id}
+                      className="flex flex-wrap items-center gap-3 rounded-xl border bg-white p-5"
+                    >
+                      <div className="min-w-[190px] flex-1">
+                        <b>{i.invoice_number || "Draft"}</b>
+                        <small className="block text-slate-500">
+                          {i.customer_name} · {i.project_name}
+                        </small>
+                      </div>
+                      <div>
+                        <small className="block text-slate-500">Balance</small>
+                        <strong>{peso(i.balance_centavos)}</strong>
+                      </div>
+                      <Badge>{i.status}</Badge>
+                      {archived && <Badge>ARCHIVED</Badge>}
+                      <button onClick={() => printInvoice(i)} className="action">
+                        <Printer size={15} />
+                        Print
+                      </button>
+                      <button disabled={busy} onClick={() => downloadInvoice(i)} className="action">
+                        <Download size={15} />
+                        {archived ? "Download & update PDF" : "Download PDF"}
+                      </button>
+                      {archived && (
+                        <button
+                          onClick={() => setDocumentOpen({ document: archived, source: null })}
+                          className="action"
+                        >
+                          <FileSearch size={15} />
+                          View in Documents
+                        </button>
+                      )}
+                      <button
+                        disabled={busy || Number(i.balance_centavos) <= 0}
+                        onClick={() => setModal({ type: "payment", i })}
+                        className="primary"
+                      >
+                        Record payment
+                      </button>
+                    </div>
+                  );
+                })}
+                {!invoices.length && <Empty text="No issued invoices yet." />}
+              </section>
             </div>
           </Page>
         )}
@@ -1568,7 +1667,7 @@ function DocumentIntelligence({ document, source, invoice, busy, close, run }: a
             <small className="font-bold tracking-[.16em] text-[#3972ae]">
               {invoice
                 ? "GENERATED INVOICE / ARCHIVED RECORD"
-                : "DOCUMENT INTELLIGENCE / PO REVIEW"}
+                : "DOCUMENT INTELLIGENCE / COMMERCIAL REVIEW"}
             </small>
             <h2 className="text-xl font-bold">{document.title || "Commercial document"}</h2>
             <p className="text-xs text-slate-500">
@@ -1635,6 +1734,14 @@ function DocumentIntelligence({ document, source, invoice, busy, close, run }: a
                 <button onClick={refreshOriginal} className="mt-3 block font-bold underline">
                   Generate a new signed URL
                 </button>
+              </div>
+            ) : url && document.mime_type?.startsWith("image/") ? (
+              <div className="flex h-[75vh] items-start justify-center overflow-auto rounded-b-xl bg-slate-100 p-3">
+                <img
+                  src={url}
+                  alt={document.title || "Original invoice"}
+                  className="h-auto max-w-full rounded bg-white object-contain shadow-sm"
+                />
               </div>
             ) : url ? (
               <iframe

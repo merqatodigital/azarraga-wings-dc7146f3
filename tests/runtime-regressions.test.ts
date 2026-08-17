@@ -9,11 +9,12 @@ const workflow = readFileSync(
   new URL("../src/lib/commercial-workflow.ts", import.meta.url),
   "utf8",
 );
+const learning = readFileSync(new URL("../src/lib/document-learning.ts", import.meta.url), "utf8");
 
 test("TALA runtime does not depend on undeployed Supabase functions", () => {
   assert.doesNotMatch(agent, /supabase\.functions\.invoke/);
   assert.match(agent, /saveOpenRouterSessionKey/);
-  assert.match(agent, /process\.env\.OPENROUTER_API_KEY/);
+  assert.match(agent, /process\.env[\s\S]*OPENROUTER_API_KEY/);
   assert.doesNotMatch(agent, /import\.meta.*OPENROUTER_API_KEY/);
 });
 
@@ -45,4 +46,31 @@ test("Overview and Invoices expose archived invoice documents", () => {
   assert.match(route, /docs\.slice\(0, 5\)/);
   assert.match(route, /View in Documents/);
   assert.match(route, /GENERATED INVOICE \/ ARCHIVED RECORD/);
+});
+
+test("invoice intake remains visible and opens its intelligence after upload", () => {
+  assert.match(route, /Uploaded invoice intelligence/);
+  assert.match(route, /invoiceDocuments\.map/);
+  assert.match(route, /View original and all extracted data/);
+  assert.match(route, /category === "invoice"[\s\S]*setDocumentOpen/);
+  assert.match(route, /document\.mime_type\?\.startsWith\("image\/"\)/);
+});
+
+test("failed invoice extraction preserves a reviewable invoice document", () => {
+  assert.match(workflow, /invoice_needs_review/);
+  assert.match(workflow, /status: "NEEDS_REVIEW"/);
+  assert.doesNotMatch(workflow, /throw new Error\(\s*`Document saved safely/);
+});
+
+test("learned invoice items persist into commercial memory without creating a PO", () => {
+  assert.match(learning, /learned\.docType === "invoice"/);
+  assert.match(learning, /Create invoice item memory/);
+  assert.match(learning, /source_document_id: source\.id/);
+  assert.match(learning, /purchase_order_id: null/);
+});
+
+test("PDF extraction uses OpenRouter's free file parser and preserves document semantics", () => {
+  assert.match(agent, /engine: "cloudflare-ai"/);
+  assert.match(agent, /never classify a customer purchase order as an invoice/);
+  assert.match(agent, /expectedType/);
 });
