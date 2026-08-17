@@ -528,9 +528,12 @@ export async function uploadCommercialDocument(
       },
     })) as LearnedDocument;
     const memory = await learnCommercialDocument(data.id, learned);
+    // The intake route is authoritative for workspace placement. Keep uploaded invoices
+    // in the Invoice register even when OCR classifies a difficult scan as unknown.
+    const persistedCategory = category === "invoice" ? "invoice" : learned.docType;
     const { data: updated, error: updateError } = await supabase
       .from("client_documents")
-      .update({ category: learned.docType })
+      .update({ category: persistedCategory })
       .eq("id", data.id)
       .select("*")
       .single();
@@ -775,9 +778,10 @@ export async function reprocessCommercialDocument(document: any) {
     },
   })) as LearnedDocument;
   const memory = await learnCommercialDocument(document.id, learned);
+  const persistedCategory = expectedType === "invoice" ? "invoice" : learned.docType;
   const { error: updateError } = await supabase
     .from("client_documents")
-    .update({ category: learned.docType })
+    .update({ category: persistedCategory })
     .eq("id", document.id);
   if (updateError) fail("Update document status", updateError);
   return { learned, memory };

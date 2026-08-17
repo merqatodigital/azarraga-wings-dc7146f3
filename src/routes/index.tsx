@@ -80,6 +80,16 @@ const peso = (c: number) =>
     currency: "PHP",
     maximumFractionDigits: 0,
   }).format((c || 0) / 100);
+const shortDate = (value: any) => {
+  if (!value) return "Needs review";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Needs review";
+  return date.toLocaleDateString("en-PH", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
+};
 
 function Home() {
   const [session, setSession] = useState<any>(undefined);
@@ -170,6 +180,7 @@ function WorkspaceApp() {
   const [leads, setLeads] = useState<any[]>([]),
     [quotes, setQuotes] = useState<any[]>([]),
     [invoices, setInvoices] = useState<any[]>([]),
+    [invoiceLines, setInvoiceLines] = useState<any[]>([]),
     [pos, setPos] = useState<any[]>([]),
     [docs, setDocs] = useState<any[]>([]),
     [sources, setSources] = useState<any[]>([]),
@@ -177,10 +188,11 @@ function WorkspaceApp() {
     [learnedItems, setLearnedItems] = useState<any[]>([]),
     [evidence, setEvidence] = useState<any[]>([]);
   const load = async () => {
-    const [l, q, i, p, d, s, c, items, facts] = await Promise.all([
+    const [l, q, i, invoiceLineRows, p, d, s, c, items, facts] = await Promise.all([
       supabase.from("leads").select("*").order("created_at", { ascending: false }).limit(50),
       supabase.from("quotes").select("*").order("created_at", { ascending: false }).limit(50),
       supabase.from("invoices").select("*").order("created_at", { ascending: false }).limit(50),
+      supabase.from("invoice_lines").select("*").order("line_no").limit(500),
       supabase
         .from("purchase_orders")
         .select("*,purchase_order_lines(*)")
@@ -211,6 +223,7 @@ function WorkspaceApp() {
     setLeads(l.data || []);
     setQuotes(q.data || []);
     setInvoices(i.data || []);
+    setInvoiceLines(invoiceLineRows.data || []);
     setPos(p.data || []);
     setDocs(d.data || []);
     setSources(s.data || []);
@@ -221,6 +234,7 @@ function WorkspaceApp() {
       l.error ||
       q.error ||
       i.error ||
+      invoiceLineRows.error ||
       p.error ||
       d.error ||
       s.error ||
@@ -379,8 +393,76 @@ function WorkspaceApp() {
         ({ document, source }) =>
           document.category === "invoice" ||
           document.category === "invoice_needs_review" ||
+          document.category === "generated_invoice" ||
           source?.doc_type === "invoice",
-      );
+      )
+      .map(({ document, source }) => {
+        const extracted = source?.extracted || {};
+        const operationalInvoice = invoices.find((invoice) => invoice.id === document.invoice_id);
+        const extractedLines = Array.isArray(extracted.lines) ? extracted.lines : [];
+        const persistedInvoiceLines = operationalInvoice
+          ? invoiceLines.filter((line) => line.invoice_id === operationalInvoice.id)
+          : [];
+        const lines = extractedLines.length ? extractedLines : persistedInvoiceLines;
+        const account =
+          source?.buyer_name ||
+          source?.customer_name ||
+          extracted.buyer?.businessStyle ||
+          extracted.buyer?.name ||
+          operationalInvoice?.customer_name ||
+          "Account needs review";
+        const project =
+          source?.project_name || extracted.project?.name || operationalInvoice?.project_name;
+        const documentDate =
+          source?.doc_date ||
+          extracted.docDate ||
+          operationalInvoice?.invoice_date ||
+          operationalInvoice?.created_at ||
+          document.created_at;
+        const scopeLines = lines
+          .map(
+            (line: any) =>
+              line.rawDescription ||
+              line.raw_description ||
+              line.description ||
+              [line.productFamily || line.product_family, line.system, line.configuration]
+                .filter(Boolean)
+                .join(" · "),
+          )
+          .filter(Boolean);
+        return {
+          document,
+          source,
+          generated: document.category === "generated_invoice",
+          lines,
+          account,
+          project,
+          documentDate,
+          reference: source?.reference || operationalInvoice?.invoice_number || document.title,
+          scope:
+            scopeLines.slice(0, 2).join("; ") +
+              (scopeLines.length > 2 ? `; +${scopeLines.length - 2} more` : "") ||
+            "Scope needs review",
+          total:
+            extracted.financialSummary?.totalCentavos ??
+            extracted.totalCentavos ??
+            operationalInvoice?.total_centavos ??
+            null,
+          status:
+            document.category === "generated_invoice"
+              ? "ARCHIVED"
+              : source?.ingestion_status ||
+                (document.category === "invoice_needs_review" ? "NEEDS REVIEW" : "STORED"),
+        };
+      })
+      .sort(
+        (a, b) =>
+          a.account.localeCompare(b.account) ||
+          new Date(b.documentDate || 0).getTime() - new Date(a.documentDate || 0).getTime(),
+      ),
+    invoiceReviewCount = invoiceDocuments.filter(
+      ({ source, status }) => source?.human_review_required || status === "NEEDS REVIEW",
+    ).length;
   return (
     <div
       className={`min-h-screen bg-[#f6f8fb] text-[#14263d] lg:grid ${agentOpen ? "lg:grid-cols-[238px_minmax(0,1fr)_365px]" : "lg:grid-cols-[238px_minmax(0,1fr)]"}`}
@@ -845,70 +927,128 @@ function WorkspaceApp() {
               <section>
                 <div className="mb-3 flex flex-wrap items-end justify-between gap-2">
                   <div>
-                    <h3 className="font-bold">Uploaded invoice intelligence</h3>
+                    <h3 className="font-bold">Invoice intelligence register</h3>
                     <p className="text-xs text-slate-500">
-                      Original invoice images and PDFs with account data, extracted totals and every
-                      learned item.
+                      Uploaded invoice OCR and downloaded Azarraga invoice PDFs stay here, organized
+                      by account, invoice date and real scope of work.
                     </p>
                   </div>
-                  <Badge>{invoiceDocuments.length} FILES</Badge>
+                  <div className="flex gap-2">
+                    <Badge>{invoiceDocuments.length} INVOICES</Badge>
+                    <Badge>{invoiceReviewCount} NEED REVIEW</Badge>
+                  </div>
                 </div>
-                <div className="grid gap-3 xl:grid-cols-2">
-                  {invoiceDocuments.map(({ document, source }) => {
-                    const extracted = source?.extracted || {};
-                    const extractedLines = Array.isArray(extracted.lines) ? extracted.lines : [];
-                    const total =
-                      extracted.financialSummary?.totalCentavos ?? extracted.totalCentavos ?? null;
-                    return (
-                      <button
-                        key={document.id}
-                        onClick={() => setDocumentOpen({ document, source })}
-                        className="rounded-xl border bg-white p-5 text-left transition hover:border-[#0F4C81] hover:shadow-sm"
-                      >
-                        <div className="flex items-start gap-3">
-                          <div className="rounded-lg bg-blue-50 p-2 text-[#0F4C81]">
-                            <ReceiptText size={20} />
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <div className="flex flex-wrap items-center justify-between gap-2">
-                              <b className="truncate">{document.title || "Uploaded invoice"}</b>
-                              <Badge>
-                                {source?.ingestion_status ||
-                                  (document.category === "invoice_needs_review"
-                                    ? "NEEDS REVIEW"
-                                    : "STORED")}
-                              </Badge>
-                            </div>
-                            <p className="mt-1 text-xs text-slate-500">
-                              {source?.reference || "Reference not extracted"} ·{" "}
-                              {extractedLines.length} line items
-                            </p>
-                            <div className="mt-3 grid gap-2 text-xs sm:grid-cols-3">
-                              <span>
-                                <small className="block text-slate-400">Account</small>
-                                {source?.buyer_name || source?.customer_name || "Review required"}
-                              </span>
-                              <span>
-                                <small className="block text-slate-400">Project</small>
-                                {source?.project_name || "Not stated"}
-                              </span>
-                              <span>
-                                <small className="block text-slate-400">Total</small>
-                                <b>{total == null ? "Not extracted" : detailedMoney(total)}</b>
-                              </span>
-                            </div>
-                            <span className="mt-4 inline-flex items-center gap-1 text-xs font-bold text-[#0F4C81]">
-                              <Eye size={14} /> View original and all extracted data
-                            </span>
-                          </div>
-                        </div>
-                      </button>
-                    );
-                  })}
+                <div className="mb-3 rounded-xl border border-blue-100 bg-blue-50 p-4 text-sm text-[#24496d]">
+                  <b>How TALA learns outside invoices:</b> upload the original → TALA extracts the
+                  account, date, totals and every scope line → select <b>Review & teach TALA</b> →
+                  correct anything uncertain → save. Downloaded Azarraga invoices already use the
+                  structured invoice and invoice-line records, so their scope appears without OCR.
+                </div>
+                <div className="overflow-x-auto rounded-xl border bg-white">
+                  <table className="min-w-[1250px] w-full text-left text-xs">
+                    <thead className="bg-slate-50 text-[10px] uppercase tracking-wide text-slate-500">
+                      <tr>
+                        <th className="px-4 py-3">Invoice / source</th>
+                        <th className="px-4 py-3">Account name</th>
+                        <th className="px-4 py-3">Invoice date</th>
+                        <th className="px-4 py-3">Scope of work extracted</th>
+                        <th className="px-4 py-3">Items</th>
+                        <th className="px-4 py-3">Total</th>
+                        <th className="px-4 py-3">TALA status</th>
+                        <th className="px-4 py-3">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {invoiceDocuments.map(
+                        ({
+                          document,
+                          source,
+                          generated,
+                          account,
+                          project,
+                          documentDate,
+                          reference,
+                          scope,
+                          lines,
+                          total,
+                          status,
+                        }) => (
+                          <tr key={document.id} className="border-t align-top hover:bg-slate-50">
+                            <td className="max-w-64 px-4 py-4">
+                              <b className="block truncate">{reference || "Invoice"}</b>
+                              <small className="block truncate text-slate-500">
+                                {document.title}
+                              </small>
+                            </td>
+                            <td className="px-4 py-4">
+                              <b>{account}</b>
+                              <small className="block text-slate-500">
+                                {project || "Project not stated"}
+                              </small>
+                            </td>
+                            <td className="whitespace-nowrap px-4 py-4">
+                              {shortDate(documentDate)}
+                            </td>
+                            <td className="max-w-md whitespace-pre-wrap px-4 py-4">{scope}</td>
+                            <td className="whitespace-nowrap px-4 py-4">{lines.length} lines</td>
+                            <td className="whitespace-nowrap px-4 py-4 font-bold">
+                              {total == null ? "Needs review" : detailedMoney(total)}
+                            </td>
+                            <td className="px-4 py-4">
+                              <Badge>{status}</Badge>
+                            </td>
+                            <td className="px-4 py-4">
+                              <div className="flex flex-wrap gap-2">
+                                <button
+                                  onClick={() => setDocumentOpen({ document, source })}
+                                  className="action"
+                                >
+                                  <Eye size={14} /> Open & compare
+                                </button>
+                                {!generated && (
+                                  <>
+                                    <button
+                                      onClick={() =>
+                                        setDocumentOpen({ document, source, edit: true })
+                                      }
+                                      className="primary"
+                                    >
+                                      <Pencil size={14} /> Review & teach TALA
+                                    </button>
+                                    <button
+                                      disabled={busy}
+                                      onClick={() =>
+                                        run(
+                                          () => reprocessCommercialDocument(document),
+                                          "Invoice OCR completed again",
+                                        )
+                                      }
+                                      className="action"
+                                    >
+                                      <RotateCw size={14} /> Re-run OCR
+                                    </button>
+                                  </>
+                                )}
+                                <button
+                                  onClick={() =>
+                                    run(
+                                      () => downloadCommercialDocument(document),
+                                      "Invoice original downloaded",
+                                    )
+                                  }
+                                  className="action"
+                                >
+                                  <Download size={14} /> Download
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ),
+                      )}
+                    </tbody>
+                  </table>
                   {!invoiceDocuments.length && (
-                    <div className="rounded-xl border border-dashed bg-white p-8 text-center text-sm text-slate-400 xl:col-span-2">
-                      No invoice files uploaded yet. Upload an invoice image or PDF above.
-                    </div>
+                    <Empty text="No invoice files uploaded yet. Upload an invoice image or PDF above." />
                   )}
                 </div>
               </section>

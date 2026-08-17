@@ -49,11 +49,27 @@ test("Overview and Invoices expose archived invoice documents", () => {
 });
 
 test("invoice intake remains visible and opens its intelligence after upload", () => {
-  assert.match(route, /Uploaded invoice intelligence/);
+  assert.match(route, /Invoice intelligence register/);
   assert.match(route, /invoiceDocuments\.map/);
-  assert.match(route, /View original and all extracted data/);
+  assert.match(route, /Review & teach TALA/);
   assert.match(route, /category === "invoice"[\s\S]*setDocumentOpen/);
   assert.match(route, /document\.mime_type\?\.startsWith\("image\/"\)/);
+});
+
+test("invoice intake category survives uncertain OCR classification", () => {
+  assert.match(workflow, /category === "invoice" \? "invoice" : learned\.docType/);
+  assert.match(workflow, /expectedType === "invoice" \? "invoice" : learned\.docType/);
+  assert.match(route, /Account name/);
+  assert.match(route, /Invoice date/);
+  assert.match(route, /Scope of work extracted/);
+});
+
+test("downloaded Azarraga invoices remain in the Invoice register with persisted scope", () => {
+  assert.match(route, /document\.category === "generated_invoice"/);
+  assert.match(route, /invoiceLines\.filter/);
+  assert.match(route, /operationalInvoice\?\.customer_name/);
+  assert.match(route, /Downloaded Azarraga invoices already use the/);
+  assert.match(route, /Re-run OCR/);
 });
 
 test("failed invoice extraction preserves a reviewable invoice document", () => {
