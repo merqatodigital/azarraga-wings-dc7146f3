@@ -1,5 +1,6 @@
 import { supabase } from "@/integrations/supabase/client";
 import { calculateLineAmount, normalizePurchaseOrderNumber } from "@/lib/purchase-order";
+import { learnedProductFamily, statedDocumentTotalCentavos } from "@/lib/document-intelligence";
 
 export type LearnedDocument = {
   docType: "purchase_order" | "invoice" | "quotation" | "receipt" | "supplier_quote" | "unknown";
@@ -7,11 +8,33 @@ export type LearnedDocument = {
   docDate?: string;
   expectedDate?: string;
   mrsNumber?: string;
+  prNumber?: string;
+  prsNumber?: string;
   paymentTerms?: string;
+  paymentMilestones?: Array<{ percent?: number; trigger?: string; rawText: string }>;
+  deliverySchedule?: string;
+  contractType?: string;
+  warranty?: string;
+  serviceScope?: string;
   memo?: string;
   transactionId?: string;
-  supplier?: { name?: string; address?: string; contactPerson?: string; phone?: string };
-  buyer?: { name?: string; address?: string; tin?: string };
+  supplier?: {
+    name?: string;
+    address?: string;
+    tin?: string;
+    contactPerson?: string;
+    email?: string;
+    phone?: string;
+  };
+  buyer?: {
+    name?: string;
+    businessStyle?: string;
+    address?: string;
+    tin?: string;
+    contactPerson?: string;
+    email?: string;
+    phone?: string;
+  };
   project?: { name?: string; location?: string };
   instructions?: string;
   lines: Array<{
@@ -44,6 +67,12 @@ export type LearnedDocument = {
     amountCentavos: number;
     rawText?: string;
   }>;
+  financialSummary?: {
+    subtotalCentavos?: number;
+    amountWithoutTaxCentavos?: number;
+    vatCentavos?: number;
+    totalCentavos?: number;
+  };
   totalCentavos?: number;
   missingInformation?: string[];
   conflicts?: string[];
@@ -92,7 +121,7 @@ export async function learnCommercialDocument(clientDocumentId: string, learned:
     location: learned.project?.location || null,
     doc_date: learned.docDate || null,
     expected_date: learned.expectedDate || null,
-    mrs_number: learned.mrsNumber || null,
+    mrs_number: learned.mrsNumber || learned.prsNumber || null,
     payment_terms_raw: learned.paymentTerms || null,
     memo: learned.memo || null,
     transaction_id: learned.transactionId || null,
@@ -173,9 +202,11 @@ export async function learnCommercialDocument(clientDocumentId: string, learned:
         .from("customers")
         .insert({
           name: learned.buyer.name,
-          company: learned.buyer.name,
+          company: learned.buyer.businessStyle || learned.buyer.name,
           billing_address: learned.buyer.address || null,
           tin: learned.buyer.tin || null,
+          email: learned.buyer.email || null,
+          phone: learned.buyer.phone || null,
           source_document_id: source.id,
           created_by: user.id,
         })
@@ -183,14 +214,41 @@ export async function learnCommercialDocument(clientDocumentId: string, learned:
         .single();
       if (error) fail("Create customer", error);
       customer = data;
-    } else
-      await supabase
+    } else {
+      const { error } = await supabase
         .from("customers")
         .update({
+          company: customer.company || learned.buyer.businessStyle || learned.buyer.name,
           billing_address: customer.billing_address || learned.buyer.address || null,
           tin: customer.tin || learned.buyer.tin || null,
+          email: customer.email || learned.buyer.email || null,
+          phone: customer.phone || learned.buyer.phone || null,
         })
         .eq("id", customer.id);
+      if (error) fail("Update customer account", error);
+    }
+    if (customer && learned.buyer.contactPerson?.trim()) {
+      const { data: existingContact, error: contactFindError } = await supabase
+        .from("contacts")
+        .select("id")
+        .eq("customer_id", customer.id)
+        .ilike("name", learned.buyer.contactPerson.trim())
+        .limit(1)
+        .maybeSingle();
+      if (contactFindError) fail("Find customer contact", contactFindError);
+      if (!existingContact) {
+        const { error } = await supabase.from("contacts").insert({
+          customer_id: customer.id,
+          name: learned.buyer.contactPerson.trim(),
+          email: learned.buyer.email || null,
+          phone: learned.buyer.phone || null,
+          role: "Document contact",
+          notes: `Learned from ${normalizedReference || cd.title}`,
+          created_by: user.id,
+        });
+        if (error) fail("Create customer contact", error);
+      }
+    }
   }
   let project: any = null;
   if (learned.project?.name) {
@@ -286,13 +344,22 @@ export async function learnCommercialDocument(clientDocumentId: string, learned:
       0,
     );
     const calculatedTotalCentavos = Math.max(0, lineSubtotalCentavos + adjustmentTotalCentavos);
+    const statedTotal = statedDocumentTotalCentavos(learned);
     const documentTotalCentavos =
-      learned.totalCentavos == null ? calculatedTotalCentavos : Number(learned.totalCentavos);
+      statedTotal == null ? calculatedTotalCentavos : Number(statedTotal);
     const totalMatched = documentTotalCentavos === calculatedTotalCentavos;
     const comparison = {
       source: "DOCUMENT_INGESTION",
       mrsNumber: learned.mrsNumber,
+      prNumber: learned.prNumber,
+      prsNumber: learned.prsNumber,
       expectedDate: learned.expectedDate,
+      deliverySchedule: learned.deliverySchedule,
+      contractType: learned.contractType,
+      warranty: learned.warranty,
+      serviceScope: learned.serviceScope,
+      paymentMilestones: learned.paymentMilestones || [],
+      financialSummary: learned.financialSummary || null,
       memo: learned.memo,
       transactionId: learned.transactionId,
       lineSubtotalCentavos,
@@ -386,70 +453,66 @@ export async function learnCommercialDocument(clientDocumentId: string, learned:
         const { error } = await supabase.from("purchase_order_lines").insert(rows);
         if (error) fail("Create PO line memory", error);
       }
-      const items = normalizedLines
-        .filter(({ line }) => line.productFamily)
-        .map(({ line: l, quantity, unitPrice }) => ({
-          customer_id: customer?.id || null,
-          project_id: project?.id || null,
-          purchase_order_id: po.id,
-          product_family: l.productFamily!,
-          system: l.system || null,
-          description: l.rawDescription,
-          glass:
-            [l.glassThicknessMm ? `${l.glassThicknessMm}mm` : null, l.glassType, l.glassColor]
-              .filter(Boolean)
-              .join(" ") || null,
-          frame_color: l.frameColor || null,
-          width_mm: l.widthMm || null,
-          height_mm: l.heightMm || null,
-          quantity,
-          unit_price_centavos: unitPrice,
-          currency: "PHP",
-          purchased_on: learned.docDate || null,
-          source_reference: learned.reference,
-          source_document_id: source.id,
-          created_by: user.id,
-        }));
+      const items = normalizedLines.map(({ line: l, quantity, unitPrice }) => ({
+        customer_id: customer?.id || null,
+        project_id: project?.id || null,
+        purchase_order_id: po.id,
+        product_family: learnedProductFamily(l),
+        system: l.system || null,
+        description: l.rawDescription,
+        glass:
+          [l.glassThicknessMm ? `${l.glassThicknessMm}mm` : null, l.glassType, l.glassColor]
+            .filter(Boolean)
+            .join(" ") || null,
+        frame_color: l.frameColor || null,
+        width_mm: l.widthMm || null,
+        height_mm: l.heightMm || null,
+        quantity,
+        unit_price_centavos: unitPrice,
+        currency: "PHP",
+        purchased_on: learned.docDate || null,
+        source_reference: learned.reference,
+        source_document_id: source.id,
+        created_by: user.id,
+      }));
       if (items.length) {
         const { error } = await supabase.from("items_purchased").insert(items);
         if (error) fail("Create purchased-item memory", error);
       }
-      const evidence = normalizedLines
-        .filter(({ line }) => line.productFamily)
-        .map(({ line: l, quantity, unitPrice, amount }) => ({
-          customer_name: learned.buyer?.name || null,
-          project_name: learned.project?.name || null,
-          location: learned.project?.location || null,
-          product_family: l.productFamily!,
-          system: l.system || null,
-          configuration: {
-            openingCode: l.openingCode,
-            configuration: l.configuration,
-            hardware: l.hardware,
-            rawDescription: l.rawDescription,
-            rawDimensions: l.rawDimensions,
-            class: l.class,
-            vatCentavos: l.vatCentavos,
-          },
-          glass: { thicknessMm: l.glassThicknessMm, type: l.glassType, color: l.glassColor },
-          frame_color: l.frameColor || null,
-          width_mm: l.widthMm || null,
-          height_mm: l.heightMm || null,
-          quantity,
-          historical_unit_price_centavos: unitPrice,
-          historical_line_amount_centavos: amount,
-          currency: "PHP",
-          included_services: [],
-          pricing_type: "HISTORICAL_EVIDENCE",
-          source_reference: learned.reference!,
-          source_date: learned.docDate || null,
-          source_document_id: source.id,
-          evidence_kind: "FACT",
-          confidence: l.confidence ?? 1,
-          human_review_required: l.humanReviewRequired ?? false,
-          raw: l,
-          created_by: user.id,
-        }));
+      const evidence = normalizedLines.map(({ line: l, quantity, unitPrice, amount }) => ({
+        customer_name: learned.buyer?.name || null,
+        project_name: learned.project?.name || null,
+        location: learned.project?.location || null,
+        product_family: learnedProductFamily(l),
+        system: l.system || null,
+        configuration: {
+          openingCode: l.openingCode,
+          configuration: l.configuration,
+          hardware: l.hardware,
+          rawDescription: l.rawDescription,
+          rawDimensions: l.rawDimensions,
+          class: l.class,
+          vatCentavos: l.vatCentavos,
+        },
+        glass: { thicknessMm: l.glassThicknessMm, type: l.glassType, color: l.glassColor },
+        frame_color: l.frameColor || null,
+        width_mm: l.widthMm || null,
+        height_mm: l.heightMm || null,
+        quantity,
+        historical_unit_price_centavos: unitPrice,
+        historical_line_amount_centavos: amount,
+        currency: "PHP",
+        included_services: [],
+        pricing_type: "HISTORICAL_EVIDENCE",
+        source_reference: learned.reference!,
+        source_date: learned.docDate || null,
+        source_document_id: source.id,
+        evidence_kind: "FACT",
+        confidence: l.confidence ?? 1,
+        human_review_required: l.humanReviewRequired ?? false,
+        raw: l,
+        created_by: user.id,
+      }));
       if (evidence.length) {
         const { error } = await supabase.from("commercial_evidence").insert(evidence);
         if (error) fail("Create commercial evidence", error);
@@ -472,6 +535,64 @@ export async function learnCommercialDocument(clientDocumentId: string, learned:
     }
   } else {
     await resetPriorExtraction(source.id);
+    const sourceReference = normalizedReference || learned.reference?.trim() || cd.title;
+    const evidence = learned.lines.map((line, index) => {
+      const quantity = Number.isFinite(Number(line.quantity)) ? Number(line.quantity) : 0;
+      const unitPrice = Number.isInteger(Number(line.unitPriceCentavos))
+        ? Number(line.unitPriceCentavos)
+        : 0;
+      const amount = Number.isInteger(Number(line.amountCentavos))
+        ? Number(line.amountCentavos)
+        : calculateLineAmount(quantity, unitPrice);
+      return {
+        customer_name: learned.buyer?.name || null,
+        project_name: learned.project?.name || null,
+        location: learned.project?.location || null,
+        product_family: learnedProductFamily(line),
+        system: line.system || null,
+        configuration: {
+          openingCode: line.openingCode,
+          configuration: line.configuration,
+          hardware: line.hardware,
+          rawDescription: line.rawDescription,
+          rawDimensions: line.rawDimensions,
+          class: line.class,
+          vatCentavos: line.vatCentavos,
+          unit: line.unit,
+          documentType: learned.docType,
+          lineNo: line.lineNo || index + 1,
+        },
+        glass: {
+          thicknessMm: line.glassThicknessMm,
+          type: line.glassType,
+          color: line.glassColor,
+        },
+        frame_color: line.frameColor || null,
+        width_mm: line.widthMm || null,
+        height_mm: line.heightMm || null,
+        quantity,
+        historical_unit_price_centavos: unitPrice,
+        historical_line_amount_centavos: amount,
+        currency: "PHP",
+        included_services: learned.serviceScope ? [learned.serviceScope] : [],
+        pricing_type:
+          learned.docType === "quotation" || learned.docType === "supplier_quote"
+            ? "QUOTED_EVIDENCE"
+            : "HISTORICAL_EVIDENCE",
+        source_reference: sourceReference,
+        source_date: learned.docDate || null,
+        source_document_id: source.id,
+        evidence_kind: "FACT",
+        confidence: line.confidence ?? 1,
+        human_review_required: line.humanReviewRequired ?? false,
+        raw: line,
+        created_by: user.id,
+      };
+    });
+    if (evidence.length) {
+      const { error } = await supabase.from("commercial_evidence").insert(evidence);
+      if (error) fail("Create document item evidence", error);
+    }
   }
   return {
     sourceDocument: source,

@@ -165,9 +165,12 @@ function WorkspaceApp() {
     [invoices, setInvoices] = useState<any[]>([]),
     [pos, setPos] = useState<any[]>([]),
     [docs, setDocs] = useState<any[]>([]),
-    [sources, setSources] = useState<any[]>([]);
+    [sources, setSources] = useState<any[]>([]),
+    [customers, setCustomers] = useState<any[]>([]),
+    [learnedItems, setLearnedItems] = useState<any[]>([]),
+    [evidence, setEvidence] = useState<any[]>([]);
   const load = async () => {
-    const [l, q, i, p, d, s] = await Promise.all([
+    const [l, q, i, p, d, s, c, items, facts] = await Promise.all([
       supabase.from("leads").select("*").order("created_at", { ascending: false }).limit(50),
       supabase.from("quotes").select("*").order("created_at", { ascending: false }).limit(50),
       supabase.from("invoices").select("*").order("created_at", { ascending: false }).limit(50),
@@ -186,6 +189,17 @@ function WorkspaceApp() {
         .select("*")
         .order("created_at", { ascending: false })
         .limit(50),
+      supabase.from("customers").select("*").order("created_at", { ascending: false }).limit(50),
+      supabase
+        .from("items_purchased")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(100),
+      supabase
+        .from("commercial_evidence")
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(100),
     ]);
     setLeads(l.data || []);
     setQuotes(q.data || []);
@@ -193,7 +207,19 @@ function WorkspaceApp() {
     setPos(p.data || []);
     setDocs(d.data || []);
     setSources(s.data || []);
-    const e = l.error || q.error || i.error || p.error || d.error || s.error;
+    setCustomers(c.data || []);
+    setLearnedItems(items.data || []);
+    setEvidence(facts.data || []);
+    const e =
+      l.error ||
+      q.error ||
+      i.error ||
+      p.error ||
+      d.error ||
+      s.error ||
+      c.error ||
+      items.error ||
+      facts.error;
     if (e) setNotice(`Refresh failed: ${e.message}`);
   };
   useEffect(() => {
@@ -298,7 +324,11 @@ function WorkspaceApp() {
     });
   };
   const due = invoices.reduce((s, x) => s + Number(x.balance_centavos || 0), 0),
-    pipeline = quotes.reduce((s, x) => s + Number(x.total_centavos || 0), 0);
+    pipeline = quotes.reduce((s, x) => s + Number(x.total_centavos || 0), 0),
+    learnedPoValue = pos
+      .filter((x) => x.source_document_id)
+      .reduce((sum, x) => sum + Number(x.total_centavos || 0), 0),
+    reviewCount = sources.filter((x) => x.human_review_required).length;
   return (
     <div
       className={`min-h-screen bg-[#f6f8fb] text-[#14263d] lg:grid ${agentOpen ? "lg:grid-cols-[238px_minmax(0,1fr)_365px]" : "lg:grid-cols-[238px_minmax(0,1fr)]"}`}
@@ -454,6 +484,159 @@ function WorkspaceApp() {
                   onClick={() => setAgentOpen(true)}
                 />
               </Panel>
+            </div>
+            <div className="mt-3 rounded-xl border bg-white p-5">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <h3 className="font-bold">Learned commercial intelligence</h3>
+                  <p className="text-xs text-slate-500">
+                    Customer accounts, POs and item history created from uploaded source documents.
+                  </p>
+                </div>
+                <button onClick={() => setTab("Documents")} className="action">
+                  <FileSearch size={15} />
+                  Upload or inspect documents
+                </button>
+              </div>
+              <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <Stat
+                  label="Customer accounts"
+                  value={String(customers.length)}
+                  meta="Supabase customers"
+                />
+                <Stat
+                  label="Learned PO value"
+                  value={peso(learnedPoValue)}
+                  meta={`${pos.filter((x) => x.source_document_id).length} document POs`}
+                />
+                <Stat
+                  label="Items learned"
+                  value={String(evidence.length)}
+                  meta={`${learnedItems.length} purchased-item records`}
+                />
+                <Stat
+                  label="Review required"
+                  value={String(reviewCount)}
+                  meta="Extraction conflicts or missing fields"
+                />
+              </div>
+              <div className="mt-4 grid gap-4 xl:grid-cols-[.9fr_1.5fr]">
+                <div className="overflow-hidden rounded-xl border">
+                  <div className="border-b bg-slate-50 px-4 py-3 text-sm font-bold">
+                    Latest learned documents
+                  </div>
+                  {sources.slice(0, 5).map((source) => {
+                    const document = docs.find((doc) => doc.source_document_id === source.id);
+                    const extracted = source.extracted || {};
+                    const total =
+                      extracted.financialSummary?.totalCentavos ?? extracted.totalCentavos;
+                    return (
+                      <button
+                        key={source.id}
+                        onClick={() => document && setDocumentOpen({ document, source })}
+                        disabled={!document}
+                        className="flex w-full items-start justify-between gap-3 border-t px-4 py-3 text-left first:border-t-0 hover:bg-slate-50 disabled:cursor-default"
+                      >
+                        <span className="min-w-0">
+                          <b className="block truncate text-sm">
+                            {source.reference || source.filename || "Commercial document"}
+                          </b>
+                          <small className="block truncate text-slate-500">
+                            {source.customer_name ||
+                              extracted.buyer?.name ||
+                              "Customer not extracted"}{" "}
+                            ·{" "}
+                            {source.project_name ||
+                              extracted.project?.name ||
+                              "Project not extracted"}
+                          </small>
+                          <small className="text-slate-400">
+                            {source.doc_type} · {source.doc_date || "Date unavailable"}
+                          </small>
+                        </span>
+                        <span className="shrink-0 text-right text-xs">
+                          {total != null && <b className="block">{peso(Number(total))}</b>}
+                          <span
+                            className={
+                              source.human_review_required ? "text-amber-700" : "text-emerald-700"
+                            }
+                          >
+                            {source.human_review_required ? "Review" : source.ingestion_status}
+                          </span>
+                        </span>
+                      </button>
+                    );
+                  })}
+                  {!sources.length && (
+                    <Empty text="No learned documents yet. Upload a customer PO, invoice or quotation." />
+                  )}
+                </div>
+                <div className="overflow-x-auto rounded-xl border">
+                  <div className="border-b bg-slate-50 px-4 py-3 text-sm font-bold">
+                    Ordered and quoted items learned
+                  </div>
+                  <table className="min-w-[900px] w-full text-left text-xs">
+                    <thead className="text-[10px] uppercase tracking-wide text-slate-500">
+                      <tr>
+                        {[
+                          "Account / project",
+                          "Item and scope",
+                          "Dimensions",
+                          "Quantity",
+                          "Unit price",
+                          "Source",
+                        ].map((h) => (
+                          <th key={h} className="px-3 py-3">
+                            {h}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {evidence.slice(0, 8).map((item) => {
+                        const raw: any = item.raw || {};
+                        return (
+                          <tr key={item.id} className="border-t align-top">
+                            <td className="px-3 py-3">
+                              <b>{item.customer_name || "—"}</b>
+                              <small className="block text-slate-500">
+                                {item.project_name || "—"}
+                              </small>
+                            </td>
+                            <td className="max-w-sm whitespace-pre-wrap px-3 py-3">
+                              <b>{item.product_family || "Unclassified"}</b>
+                              <small className="block text-slate-500">
+                                {raw.rawDescription || "Description unavailable"}
+                              </small>
+                            </td>
+                            <td className="px-3 py-3">
+                              {raw.rawDimensions ||
+                                (item.width_mm && item.height_mm
+                                  ? `${item.width_mm} × ${item.height_mm} mm`
+                                  : "—")}
+                            </td>
+                            <td className="px-3 py-3">
+                              {item.quantity ?? "—"} {raw.unit || ""}
+                            </td>
+                            <td className="px-3 py-3">
+                              {item.historical_unit_price_centavos == null
+                                ? "—"
+                                : peso(item.historical_unit_price_centavos)}
+                            </td>
+                            <td className="px-3 py-3">
+                              <b>{item.source_reference}</b>
+                              <small className="block text-slate-500">
+                                {item.source_date || "Date unavailable"}
+                              </small>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                  {!evidence.length && <Empty text="No item evidence learned yet." />}
+                </div>
+              </div>
             </div>
           </>
         )}
@@ -1152,6 +1335,7 @@ function DocumentIntelligence({ document, source, busy, close, run }: any) {
     0,
   );
   const vat = lines.reduce((sum: number, line: any) => sum + Number(line.vatCentavos || 0), 0);
+  const financial = extracted.financialSummary || {};
   const openOriginal = () => {
     run(async () => {
       const fresh = await createCommercialDocumentSignedUrl(document, 120);
@@ -1280,6 +1464,10 @@ function DocumentIntelligence({ document, source, busy, close, run }: any) {
                         value={source.buyer_address || extracted.buyer?.address}
                       />
                       <Meta label="TIN" value={source.buyer_tin || extracted.buyer?.tin} />
+                      <Meta label="Business" value={extracted.buyer?.businessStyle} />
+                      <Meta label="Contact" value={extracted.buyer?.contactPerson} />
+                      <Meta label="Email" value={extracted.buyer?.email} />
+                      <Meta label="Phone" value={extracted.buyer?.phone} />
                     </div>
                   </div>
                   <div className="rounded-xl border bg-white p-5">
@@ -1298,6 +1486,8 @@ function DocumentIntelligence({ document, source, busy, close, run }: any) {
                         label="Phone"
                         value={source.supplier_phone || extracted.supplier?.phone}
                       />
+                      <Meta label="TIN" value={extracted.supplier?.tin} />
+                      <Meta label="Email" value={extracted.supplier?.email} />
                     </div>
                   </div>
                   <div className="rounded-xl border bg-white p-5">
@@ -1314,16 +1504,36 @@ function DocumentIntelligence({ document, source, busy, close, run }: any) {
                 <div className="rounded-xl border bg-white p-5">
                   <b>Financial and scope summary</b>
                   <div className="mt-3 grid gap-3 sm:grid-cols-3 lg:grid-cols-5">
-                    <Meta label="Product subtotal" value={detailedMoney(subtotal)} />
-                    <Meta label="VAT" value={detailedMoney(vat)} />
+                    <Meta
+                      label="Printed subtotal"
+                      value={detailedMoney(
+                        financial.subtotalCentavos ??
+                          financial.amountWithoutTaxCentavos ??
+                          subtotal,
+                      )}
+                    />
+                    <Meta label="VAT" value={detailedMoney(financial.vatCentavos ?? vat)} />
                     <Meta label="Discount" value={detailedMoney(adjustment("DISCOUNT"))} />
                     <Meta label="Crating" value={detailedMoney(adjustment("CRATING"))} />
                     <Meta label="Shipping" value={detailedMoney(adjustment("SHIPPING"))} />
                     <Meta label="Trucking" value={detailedMoney(adjustment("TRUCKING"))} />
                     <Meta label="Delivery" value={detailedMoney(adjustment("DELIVERY"))} />
                     <Meta label="Installation" value={detailedMoney(adjustment("INSTALLATION"))} />
-                    <Meta label="Document total" value={detailedMoney(extracted.totalCentavos)} />
+                    <Meta
+                      label="Document total"
+                      value={detailedMoney(financial.totalCentavos ?? extracted.totalCentavos)}
+                    />
+                    <Meta label="PR number" value={extracted.prNumber} />
+                    <Meta label="PRS number" value={extracted.prsNumber} />
+                    <Meta label="Contract type" value={extracted.contractType} />
+                    <Meta label="Delivery schedule" value={extracted.deliverySchedule} />
+                    <Meta label="Warranty" value={extracted.warranty} />
                   </div>
+                  {extracted.serviceScope && (
+                    <p className="mt-4 whitespace-pre-wrap border-t pt-3 text-sm">
+                      <b>Scope:</b> {extracted.serviceScope}
+                    </p>
+                  )}
                   {adjustments.length > 0 && (
                     <div className="mt-4 border-t pt-3 text-sm">
                       {adjustments.map((item: any, index: number) => (
