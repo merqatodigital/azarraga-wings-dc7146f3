@@ -580,6 +580,67 @@ export async function downloadCommercialDocument(document: {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+/** Persist an owner-generated invoice PDF so it is visible in Documents and Overview. */
+export async function archiveGeneratedInvoiceDocument(
+  invoice: {
+    id: string;
+    customer_id?: string | null;
+    project_id?: string | null;
+    purchase_order_id?: string | null;
+  },
+  fileName: string,
+  pdf: Blob,
+) {
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) throw new Error("Sign in required");
+  const safeName = fileName.replace(/[^a-zA-Z0-9._-]/g, "_");
+  const path = `${user.id}/generated-invoices/${invoice.id}-${safeName}`;
+  const { error: uploadError } = await supabase.storage
+    .from("commercial-documents")
+    .upload(path, pdf, { contentType: "application/pdf", upsert: true });
+  if (uploadError) fail("Archive invoice PDF", uploadError);
+  const { data: existing, error: findError } = await supabase
+    .from("client_documents")
+    .select("*")
+    .eq("invoice_id", invoice.id)
+    .eq("category", "generated_invoice")
+    .limit(1)
+    .maybeSingle();
+  if (findError) fail("Find archived invoice", findError);
+  const record = {
+    bucket: "commercial-documents",
+    storage_path: path,
+    title: fileName,
+    category: "generated_invoice",
+    mime_type: "application/pdf",
+    file_size: pdf.size,
+    customer_id: invoice.customer_id || null,
+    project_id: invoice.project_id || null,
+    purchase_order_id: invoice.purchase_order_id || null,
+    invoice_id: invoice.id,
+    created_by: user.id,
+  };
+  if (existing) {
+    const { data, error } = await supabase
+      .from("client_documents")
+      .update(record)
+      .eq("id", existing.id)
+      .select("*")
+      .single();
+    if (error) fail("Update archived invoice", error);
+    return data;
+  }
+  const { data, error } = await supabase
+    .from("client_documents")
+    .insert(record)
+    .select("*")
+    .single();
+  if (error) fail("Save archived invoice", error);
+  return data;
+}
+
 export async function reprocessCommercialDocument(document: any) {
   const { data, error } = await supabase.storage
     .from(document.bucket)

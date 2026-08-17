@@ -29,7 +29,12 @@ import {
   Mail,
   CircleDollarSign,
 } from "lucide-react";
-import { listAgentModels, askAgent } from "@/lib/agent.functions";
+import {
+  listAgentModels,
+  askAgent,
+  hasOpenRouterSessionKey,
+  saveOpenRouterSessionKey,
+} from "@/lib/agent.functions";
 import { TALA_QUICK_ACTIONS, type TalaIntent } from "@/lib/agent-quick-actions";
 import { supabase } from "@/integrations/supabase/client";
 import {
@@ -42,12 +47,15 @@ import {
   uploadCommercialDocument,
   createCommercialDocumentSignedUrl,
   downloadCommercialDocument,
+  archiveGeneratedInvoiceDocument,
   reprocessCommercialDocument,
   markCommercialDocumentReviewed,
   type QuoteDraft,
 } from "@/lib/commercial-workflow";
 import { QuoteBuilder } from "@/components/commercial/QuoteBuilder";
 import {
+  commercialDocumentPdfBlob,
+  commercialDocumentPdfFileName,
   downloadCommercialDocumentPdf,
   printCommercialDocument,
   type CommercialDocument,
@@ -336,11 +344,20 @@ function WorkspaceApp() {
     }
   };
   const downloadInvoice = async (i: any) => {
+    setBusy(true);
+    setNotice("");
     try {
-      downloadCommercialDocumentPdf(await invoiceDocument(i));
-      setNotice(`Invoice ${i.invoice_number || "draft"} downloaded as PDF`);
+      const document = await invoiceDocument(i);
+      const pdf = commercialDocumentPdfBlob(document);
+      const fileName = commercialDocumentPdfFileName(document);
+      await archiveGeneratedInvoiceDocument(i, fileName, pdf);
+      downloadCommercialDocumentPdf(document, pdf);
+      await load();
+      setNotice(`Invoice ${i.invoice_number || "draft"} downloaded and archived in Documents`);
     } catch (e: any) {
       setNotice(e?.message || "Invoice download failed");
+    } finally {
+      setBusy(false);
     }
   };
   const due = invoices.reduce((s, x) => s + Number(x.balance_centavos || 0), 0),
@@ -543,52 +560,65 @@ function WorkspaceApp() {
               <div className="mt-4 grid gap-4 xl:grid-cols-[.9fr_1.5fr]">
                 <div className="overflow-hidden rounded-xl border">
                   <div className="border-b bg-slate-50 px-4 py-3 text-sm font-bold">
-                    Latest learned documents
+                    Latest commercial documents
                   </div>
-                  {sources.slice(0, 5).map((source) => {
-                    const document = docs.find((doc) => doc.source_document_id === source.id);
-                    const extracted = source.extracted || {};
+                  {docs.slice(0, 5).map((document) => {
+                    const source = sources.find((item) => item.id === document.source_document_id);
+                    const extracted = source?.extracted || {};
+                    const invoice = invoices.find((item) => item.id === document.invoice_id);
                     const total =
-                      extracted.financialSummary?.totalCentavos ?? extracted.totalCentavos;
+                      extracted.financialSummary?.totalCentavos ??
+                      extracted.totalCentavos ??
+                      invoice?.total_centavos;
                     return (
                       <button
-                        key={source.id}
-                        onClick={() => document && setDocumentOpen({ document, source })}
-                        disabled={!document}
-                        className="flex w-full items-start justify-between gap-3 border-t px-4 py-3 text-left first:border-t-0 hover:bg-slate-50 disabled:cursor-default"
+                        key={document.id}
+                        onClick={() => setDocumentOpen({ document, source })}
+                        className="flex w-full items-start justify-between gap-3 border-t px-4 py-3 text-left first:border-t-0 hover:bg-slate-50"
                       >
                         <span className="min-w-0">
                           <b className="block truncate text-sm">
-                            {source.reference || source.filename || "Commercial document"}
+                            {source?.reference || document.title || "Commercial document"}
                           </b>
                           <small className="block truncate text-slate-500">
-                            {source.customer_name ||
+                            {source?.customer_name ||
                               extracted.buyer?.name ||
-                              "Customer not extracted"}{" "}
+                              invoice?.customer_name ||
+                              "Customer not linked"}{" "}
                             ·{" "}
-                            {source.project_name ||
+                            {source?.project_name ||
                               extracted.project?.name ||
-                              "Project not extracted"}
+                              invoice?.project_name ||
+                              "Project not linked"}
                           </small>
                           <small className="text-slate-400">
-                            {source.doc_type} · {source.doc_date || "Date unavailable"}
+                            {source?.doc_type ||
+                              (document.category === "generated_invoice"
+                                ? "generated invoice"
+                                : document.category)}{" "}
+                            ·{" "}
+                            {source?.doc_date || new Date(document.created_at).toLocaleDateString()}
                           </small>
                         </span>
                         <span className="shrink-0 text-right text-xs">
                           {total != null && <b className="block">{peso(Number(total))}</b>}
                           <span
                             className={
-                              source.human_review_required ? "text-amber-700" : "text-emerald-700"
+                              source?.human_review_required ? "text-amber-700" : "text-emerald-700"
                             }
                           >
-                            {source.human_review_required ? "Review" : source.ingestion_status}
+                            {source?.human_review_required
+                              ? "Review"
+                              : document.category === "generated_invoice"
+                                ? "Archived"
+                                : source?.ingestion_status || "Stored"}
                           </span>
                         </span>
                       </button>
                     );
                   })}
-                  {!sources.length && (
-                    <Empty text="No learned documents yet. Upload a customer PO, invoice or quotation." />
+                  {!docs.length && (
+                    <Empty text="No commercial documents yet. Upload or download an invoice." />
                   )}
                 </div>
                 <div className="overflow-x-auto rounded-xl border">
@@ -797,39 +827,55 @@ function WorkspaceApp() {
             }
           >
             <div className="space-y-3">
-              {invoices.map((i) => (
-                <div
-                  key={i.id}
-                  className="flex flex-wrap items-center gap-3 rounded-xl border bg-white p-5"
-                >
-                  <div className="min-w-[190px] flex-1">
-                    <b>{i.invoice_number || "Draft"}</b>
-                    <small className="block text-slate-500">
-                      {i.customer_name} · {i.project_name}
-                    </small>
-                  </div>
-                  <div>
-                    <small className="block text-slate-500">Balance</small>
-                    <strong>{peso(i.balance_centavos)}</strong>
-                  </div>
-                  <Badge>{i.status}</Badge>
-                  <button onClick={() => printInvoice(i)} className="action">
-                    <Printer size={15} />
-                    Print
-                  </button>
-                  <button onClick={() => downloadInvoice(i)} className="action">
-                    <Download size={15} />
-                    Download PDF
-                  </button>
-                  <button
-                    disabled={busy || Number(i.balance_centavos) <= 0}
-                    onClick={() => setModal({ type: "payment", i })}
-                    className="primary"
+              {invoices.map((i) => {
+                const archived = docs.find(
+                  (document) =>
+                    document.invoice_id === i.id && document.category === "generated_invoice",
+                );
+                return (
+                  <div
+                    key={i.id}
+                    className="flex flex-wrap items-center gap-3 rounded-xl border bg-white p-5"
                   >
-                    Record payment
-                  </button>
-                </div>
-              ))}
+                    <div className="min-w-[190px] flex-1">
+                      <b>{i.invoice_number || "Draft"}</b>
+                      <small className="block text-slate-500">
+                        {i.customer_name} · {i.project_name}
+                      </small>
+                    </div>
+                    <div>
+                      <small className="block text-slate-500">Balance</small>
+                      <strong>{peso(i.balance_centavos)}</strong>
+                    </div>
+                    <Badge>{i.status}</Badge>
+                    {archived && <Badge>ARCHIVED</Badge>}
+                    <button onClick={() => printInvoice(i)} className="action">
+                      <Printer size={15} />
+                      Print
+                    </button>
+                    <button disabled={busy} onClick={() => downloadInvoice(i)} className="action">
+                      <Download size={15} />
+                      {archived ? "Download & update PDF" : "Download PDF"}
+                    </button>
+                    {archived && (
+                      <button
+                        onClick={() => setDocumentOpen({ document: archived, source: null })}
+                        className="action"
+                      >
+                        <FileSearch size={15} />
+                        View in Documents
+                      </button>
+                    )}
+                    <button
+                      disabled={busy || Number(i.balance_centavos) <= 0}
+                      onClick={() => setModal({ type: "payment", i })}
+                      className="primary"
+                    >
+                      Record payment
+                    </button>
+                  </div>
+                );
+              })}
               {!invoices.length && <Empty text="No invoices yet." />}
             </div>
           </Page>
@@ -908,6 +954,7 @@ function WorkspaceApp() {
       {documentOpen && (
         <DocumentIntelligence
           document={documentOpen.document}
+          invoice={invoices.find((item) => item.id === documentOpen.document.invoice_id)}
           source={
             sources.find((s) => s.id === documentOpen.document.source_document_id) ||
             documentOpen.source
@@ -1120,6 +1167,7 @@ function Agent({ onClose }: any) {
     [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
     [secretConfigured, setSecretConfigured] = useState(false),
+    [apiKey, setApiKey] = useState(""),
     [settingsNotice, setSettingsNotice] = useState("");
   useEffect(() => {
     Promise.all([
@@ -1129,7 +1177,7 @@ function Agent({ onClose }: any) {
       .then(([runtime, saved]: any[]) => {
         const discovered = runtime.models?.length ? runtime.models : models;
         setModels(discovered);
-        setSecretConfigured(Boolean(runtime.secretConfigured));
+        setSecretConfigured(Boolean(runtime.secretConfigured || hasOpenRouterSessionKey()));
         if (saved.error) setSettingsNotice(`Settings read failed: ${saved.error.message}`);
         const savedTier: "free" | "paid" = saved.data?.free_models_only === false ? "paid" : "free";
         const savedModel = saved.data?.model;
@@ -1184,6 +1232,11 @@ function Agent({ onClose }: any) {
   };
   const saveAgentSettings = async () => {
     setSettingsNotice("");
+    if (apiKey.trim()) {
+      saveOpenRouterSessionKey(apiKey);
+      setApiKey("");
+      setSecretConfigured(true);
+    }
     const {
       data: { user },
     } = await supabase.auth.getUser();
@@ -1197,7 +1250,11 @@ function Agent({ onClose }: any) {
         updated_by: user.id,
       })
       .eq("id", 1);
-    setSettingsNotice(saveError ? `Save failed: ${saveError.message}` : "Agent settings saved");
+    setSettingsNotice(
+      saveError
+        ? `Model selected for this session; database save failed: ${saveError.message}`
+        : "OpenRouter connection and model settings saved",
+    );
   };
   return (
     <aside className="fixed inset-y-0 right-0 z-50 flex w-full max-w-[390px] flex-col border-l bg-white shadow-2xl lg:static lg:z-auto lg:min-h-screen lg:shadow-none">
@@ -1233,16 +1290,24 @@ function Agent({ onClose }: any) {
             </span>
           </div>
           <label className="mt-3 block text-[10px] font-bold text-slate-500">
-            API KEY · SUPABASE SECRET
+            OPENROUTER API KEY
           </label>
           <input
-            value={secretConfigured ? "••••••••••••••••••••••••" : "Secret not detected"}
-            readOnly
-            aria-label="OpenRouter API key status"
-            className="mt-1 w-full rounded-md border bg-white px-3 py-2 font-mono text-xs text-slate-500"
+            type="password"
+            value={apiKey}
+            onChange={(event) => setApiKey(event.target.value)}
+            placeholder={
+              secretConfigured
+                ? "Connected · paste to replace for this session"
+                : "Paste sk-or-v1-…"
+            }
+            autoComplete="off"
+            aria-label="OpenRouter API key"
+            className="mt-1 w-full rounded-md border bg-white px-3 py-2 font-mono text-xs"
           />
           <p className="mt-1 text-[10px] text-slate-500">
-            The key stays encrypted in Supabase and is never sent to the browser.
+            The Supabase secret is used when available. A pasted replacement stays only in this
+            browser session and is sent to the authenticated server runtime.
           </p>
         </div>
         <label className="text-xs font-bold">OPENROUTER MODEL SETTINGS</label>
@@ -1347,7 +1412,9 @@ function DocumentRow({ document, source, busy, open, run }: any) {
   const status =
     source?.human_review_required || document.category === "needs_review"
       ? "NEEDS REVIEW"
-      : source?.ingestion_status || (document.category !== "other" ? "LEARNED" : "STORED");
+      : document.category === "generated_invoice"
+        ? "GENERATED"
+        : source?.ingestion_status || (document.category !== "other" ? "LEARNED" : "STORED");
   return (
     <tr onClick={open} className="cursor-pointer border-t hover:bg-slate-50">
       <td className="px-5 py-4">
@@ -1436,10 +1503,12 @@ function Meta({ label, value }: any) {
     </div>
   );
 }
-function DocumentIntelligence({ document, source, busy, close, run }: any) {
+function DocumentIntelligence({ document, source, invoice, busy, close, run }: any) {
   const [url, setUrl] = useState(""),
     [urlError, setUrlError] = useState(""),
-    [loading, setLoading] = useState(false);
+    [loading, setLoading] = useState(false),
+    [generatedLines, setGeneratedLines] = useState<any[]>([]),
+    [generatedError, setGeneratedError] = useState("");
   const refreshOriginal = async () => {
     setLoading(true);
     setUrlError("");
@@ -1455,6 +1524,18 @@ function DocumentIntelligence({ document, source, busy, close, run }: any) {
   useEffect(() => {
     refreshOriginal();
   }, [document.id]);
+  useEffect(() => {
+    if (!invoice?.id) return setGeneratedLines([]);
+    supabase
+      .from("invoice_lines")
+      .select("*")
+      .eq("invoice_id", invoice.id)
+      .order("line_no")
+      .then(({ data, error }) => {
+        setGeneratedLines(data || []);
+        setGeneratedError(error?.message || "");
+      });
+  }, [invoice?.id]);
   const extracted = source?.extracted || {};
   const lines = Array.isArray(extracted.lines) ? extracted.lines : [];
   const adjustments = Array.isArray(extracted.adjustments) ? extracted.adjustments : [];
@@ -1480,7 +1561,9 @@ function DocumentIntelligence({ document, source, busy, close, run }: any) {
         <header className="sticky top-0 z-10 flex flex-wrap items-center justify-between gap-3 rounded-t-2xl border-b bg-white p-5">
           <div>
             <small className="font-bold tracking-[.16em] text-[#3972ae]">
-              DOCUMENT INTELLIGENCE / PO REVIEW
+              {invoice
+                ? "GENERATED INVOICE / ARCHIVED RECORD"
+                : "DOCUMENT INTELLIGENCE / PO REVIEW"}
             </small>
             <h2 className="text-xl font-bold">{document.title || "Commercial document"}</h2>
             <p className="text-xs text-slate-500">
@@ -1499,16 +1582,18 @@ function DocumentIntelligence({ document, source, busy, close, run }: any) {
               <Download size={15} />
               Download
             </button>
-            <button
-              disabled={busy}
-              onClick={() =>
-                run(() => reprocessCommercialDocument(document), "Document reprocessed", close)
-              }
-              className="action"
-            >
-              <RotateCw size={15} />
-              Reprocess
-            </button>
+            {!invoice && (
+              <button
+                disabled={busy}
+                onClick={() =>
+                  run(() => reprocessCommercialDocument(document), "Document reprocessed", close)
+                }
+                className="action"
+              >
+                <RotateCw size={15} />
+                Reprocess
+              </button>
+            )}
             {source?.human_review_required && (
               <button
                 disabled={busy}
@@ -1559,7 +1644,63 @@ function DocumentIntelligence({ document, source, busy, close, run }: any) {
             )}
           </section>
           <section className="min-w-0 space-y-4">
-            {!source ? (
+            {!source && invoice ? (
+              <>
+                <div className="grid gap-3 rounded-xl border bg-white p-5 sm:grid-cols-2 lg:grid-cols-4">
+                  <Meta label="Filename" value={document.title} />
+                  <Meta label="Document type" value="Azarraga invoice PDF" />
+                  <Meta label="Invoice number" value={invoice.invoice_number} />
+                  <Meta label="Status" value={invoice.status} />
+                  <Meta label="Customer" value={invoice.customer_name} />
+                  <Meta label="Project" value={invoice.project_name} />
+                  <Meta label="Total" value={detailedMoney(invoice.total_centavos)} />
+                  <Meta label="Balance" value={detailedMoney(invoice.balance_centavos)} />
+                  <Meta label="Terms" value={invoice.terms} />
+                  <Meta label="Private Storage path" value={document.storage_path} />
+                </div>
+                <div className="overflow-x-auto rounded-xl border bg-white">
+                  <div className="border-b px-5 py-4">
+                    <b>Persisted invoice line items</b>
+                    <p className="text-xs text-slate-500">
+                      Loaded from Supabase invoice_lines and included in the archived PDF.
+                    </p>
+                  </div>
+                  <table className="min-w-[800px] w-full text-left text-xs">
+                    <thead className="bg-slate-50 text-[10px] uppercase text-slate-500">
+                      <tr>
+                        {["Line", "Description", "Quantity", "Unit", "Unit price", "Amount"].map(
+                          (heading) => (
+                            <th key={heading} className="px-3 py-3">
+                              {heading}
+                            </th>
+                          ),
+                        )}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {generatedLines.map((line) => (
+                        <tr key={line.id || line.line_no} className="border-t">
+                          <td className="px-3 py-3">{line.line_no}</td>
+                          <td className="whitespace-pre-wrap px-3 py-3 font-medium">
+                            {line.description}
+                          </td>
+                          <td className="px-3 py-3">{line.quantity}</td>
+                          <td className="px-3 py-3">{line.unit}</td>
+                          <td className="px-3 py-3">{detailedMoney(line.unit_price_centavos)}</td>
+                          <td className="px-3 py-3 font-bold">
+                            {detailedMoney(line.amount_centavos)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {generatedError && <p className="p-4 text-sm text-red-700">{generatedError}</p>}
+                  {!generatedLines.length && !generatedError && (
+                    <Empty text="No invoice lines found." />
+                  )}
+                </div>
+              </>
+            ) : !source ? (
               <div className="rounded-xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-900">
                 <b>No extracted intelligence is linked yet.</b>
                 <p className="mt-1">

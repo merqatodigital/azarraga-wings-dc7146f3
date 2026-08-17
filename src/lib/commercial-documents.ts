@@ -1,3 +1,6 @@
+import { jsPDF } from "jspdf";
+import autoTable from "jspdf-autotable";
+
 export type CommercialLine = {
   description: string;
   quantity: number;
@@ -52,7 +55,7 @@ export function printCommercialDocument(d: CommercialDocument) {
   setTimeout(() => w.print(), 250);
 }
 
-export function downloadCommercialDocumentPdf(d: CommercialDocument) {
+function buildCommercialDocumentPdf(d: CommercialDocument) {
   const pdf = new jsPDF({ unit: "mm", format: "a4" });
   pdf.setTextColor(15, 76, 129);
   pdf.setFontSize(18);
@@ -117,8 +120,26 @@ export function downloadCommercialDocumentPdf(d: CommercialDocument) {
     pdf.setFont("helvetica", "normal");
     pdf.text(pdf.splitTextToSize(d.terms, 180), 14, termsY + 5);
   }
-  const safeNumber = d.number.replace(/[^a-zA-Z0-9._-]/g, "_");
-  pdf.save(`${d.kind.toLowerCase()}-${safeNumber}.pdf`);
+  return pdf;
 }
-import { jsPDF } from "jspdf";
-import autoTable from "jspdf-autotable";
+
+export function commercialDocumentPdfFileName(d: CommercialDocument) {
+  const safeNumber = d.number.replace(/[^a-zA-Z0-9._-]/g, "_");
+  return `${d.kind.toLowerCase()}-${safeNumber}.pdf`;
+}
+
+export function commercialDocumentPdfBlob(d: CommercialDocument) {
+  return buildCommercialDocumentPdf(d).output("blob");
+}
+
+export function downloadCommercialDocumentPdf(d: CommercialDocument, blob?: Blob) {
+  const file = blob || commercialDocumentPdfBlob(d);
+  const url = URL.createObjectURL(file);
+  const link = window.document.createElement("a");
+  link.href = url;
+  link.download = commercialDocumentPdfFileName(d);
+  window.document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
