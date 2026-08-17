@@ -2478,6 +2478,7 @@ function DocumentIntelligence({
                   <Meta label="MRS number" value={source.mrs_number} />
                   <Meta label="Payment terms" value={source.payment_terms_raw} />
                   <Meta label="Extraction status" value={source.ingestion_status} />
+                  <Meta label="Extraction model" value={extracted.extractionModel} />
                   <Meta
                     label="Human review"
                     value={source.human_review_required ? "Required" : "Not required"}

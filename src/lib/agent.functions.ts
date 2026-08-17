@@ -4,6 +4,7 @@ import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { TALA_INTENTS, type TalaIntent } from "@/lib/agent-quick-actions";
 import { normalizeOpenRouterApiKey, openRouterAuthorization } from "@/lib/openrouter-auth";
 import { normalizeOpenRouterModels } from "@/lib/openrouter-models";
+import { extractionNeedsReview, parseExtractionText } from "@/lib/extraction-json";
 
 const OPENROUTER_MODELS = "https://openrouter.ai/api/v1/models";
 const OPENROUTER_CHAT = "https://openrouter.ai/api/v1/chat/completions";
@@ -139,38 +140,80 @@ const ExtractInput = z.object({
   apiKey: z.string().optional(),
 });
 
-function parseExtraction(text: string) {
-  const clean = text
-    .trim()
-    .replace(/^```json\s*/i, "")
-    .replace(/^```/, "")
-    .replace(/```$/, "")
-    .trim();
-  const value = JSON.parse(clean);
-  if (!value || !Array.isArray(value.lines)) throw new Error("missing line-item array");
-  value.lines = value.lines.map((line: any, index: number) => ({
-    ...line,
-    lineNo: Number(line.lineNo) || index + 1,
-    quantity: Number(line.quantity),
-    unit: String(line.unit || ""),
-    rawDescription: String(line.rawDescription || ""),
-    hardware: Array.isArray(line.hardware) ? line.hardware : [],
-    confidence: Number.isFinite(Number(line.confidence)) ? Number(line.confidence) : 0,
-    humanReviewRequired: Boolean(line.humanReviewRequired || !line.rawDescription),
-  }));
-  value.adjustments = Array.isArray(value.adjustments) ? value.adjustments : [];
-  value.paymentMilestones = Array.isArray(value.paymentMilestones) ? value.paymentMilestones : [];
-  value.missingInformation = Array.isArray(value.missingInformation)
-    ? value.missingInformation
-    : [];
-  value.conflicts = Array.isArray(value.conflicts) ? value.conflicts : [];
-  return value;
+function openRouterMessageText(content: unknown) {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part: any) =>
+      typeof part === "string" ? part : typeof part?.text === "string" ? part.text : "",
+    )
+    .filter(Boolean)
+    .join("\n");
+}
+
+type ExtractionModel = { id: string; structured: boolean };
+
+async function discoverExtractionModels(
+  key: string,
+  mimeType: string,
+  preferredModel?: string | null,
+  freeOnly = true,
+): Promise<ExtractionModel[]> {
+  try {
+    const query = mimeType.startsWith("image/") ? "?input_modalities=image" : "";
+    const response = await fetch(`${OPENROUTER_MODELS}${query}`, {
+      headers: { Authorization: openRouterAuthorization(key), Accept: "application/json" },
+    });
+    if (!response.ok) throw new Error(`model discovery returned ${response.status}`);
+    const payload: any = await response.json();
+    const compatible = (Array.isArray(payload?.data) ? payload.data : [])
+      .filter((model: any) => {
+        const promptPrice = Number(model?.pricing?.prompt ?? 0);
+        const completionPrice = Number(model?.pricing?.completion ?? 0);
+        const free = promptPrice === 0 && completionPrice === 0;
+        const modalities = Array.isArray(model?.architecture?.input_modalities)
+          ? model.architecture.input_modalities
+          : String(model?.architecture?.modality || "").split("->");
+        const acceptsInput = mimeType.startsWith("image/")
+          ? modalities.some((item: string) => String(item).toLowerCase().includes("image"))
+          : true;
+        return model?.id && acceptsInput && (!freeOnly || free);
+      })
+      .map((model: any) => {
+        const parameters = Array.isArray(model.supported_parameters)
+          ? model.supported_parameters
+          : [];
+        const structured = parameters.some((parameter: string) =>
+          ["response_format", "structured_outputs"].includes(parameter),
+        );
+        const preferred = model.id === preferredModel;
+        const googleVision = /google\/(gemini|gemma)/i.test(model.id);
+        return {
+          id: String(model.id),
+          structured,
+          score:
+            (preferred ? 1_000_000_000 : 0) +
+            (structured ? 100_000_000 : 0) +
+            (googleVision ? 10_000_000 : 0) +
+            Number(model.context_length || 0),
+        };
+      })
+      .sort((a: any, b: any) => b.score - a.score)
+      .slice(0, 4)
+      .map(({ id, structured }: any) => ({ id, structured }));
+    const unique = new Map<string, ExtractionModel>();
+    for (const model of compatible) unique.set(model.id, model);
+    if (!unique.size) unique.set("openrouter/free", { id: "openrouter/free", structured: false });
+    return [...unique.values()];
+  } catch {
+    return [{ id: "openrouter/free", structured: false }];
+  }
 }
 
 const extractCommercialDocumentServer = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .validator((input: unknown) => ExtractInput.parse(input))
-  .handler(async ({ data }) => {
+  .handler(async ({ data, context }) => {
     const key = serverKey(data.apiKey);
     if (!key) throw new Error("Paste your OpenRouter API key in Agent Settings first");
     if (!data.mimeType.startsWith("image/") && data.mimeType !== "application/pdf")
@@ -178,45 +221,85 @@ const extractCommercialDocumentServer = createServerFn({ method: "POST" })
     const media = data.mimeType.startsWith("image/")
       ? { type: "image_url", image_url: { url: data.dataUrl } }
       : { type: "file", file: { filename: data.fileName, file_data: data.dataUrl } };
-    const response = await fetch(OPENROUTER_CHAT, {
-      method: "POST",
-      headers: {
-        Authorization: openRouterAuthorization(key),
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "openrouter/free",
-        messages: [
-          { role: "system", content: extractionRules },
-          {
-            role: "user",
-            content: [
-              {
-                type: "text",
-                text: `Read ${data.fileName}. Extract every field and line item. The owner opened this from the ${data.expectedType || "general document"} intake. Use that only as context: preserve the document's actual semantics and never classify a customer purchase order as an invoice.`,
-              },
-              media,
-            ],
-          },
-        ],
-        ...(data.mimeType === "application/pdf"
-          ? { plugins: [{ id: "file-parser", pdf: { engine: "cloudflare-ai" } }] }
-          : {}),
-        temperature: 0,
-      }),
-    });
-    const result = await response.json();
-    if (!response.ok)
-      throw new Error(result?.error?.message || `OpenRouter returned ${response.status}`);
-    const content = String(result?.choices?.[0]?.message?.content || "");
-    if (!content) throw new Error("TALA returned no extraction content");
-    try {
-      return parseExtraction(content);
-    } catch (error) {
-      throw new Error(
-        `TALA returned invalid extraction JSON: ${error instanceof Error ? error.message : String(error)}`,
-      );
+    const { data: settings } = await context.supabase
+      .from("agent_settings")
+      .select("model,free_models_only")
+      .eq("id", 1)
+      .maybeSingle();
+    const extractionModels = await discoverExtractionModels(
+      key,
+      data.mimeType,
+      settings?.model,
+      settings?.free_models_only !== false,
+    );
+    const requestExtraction = async (model: ExtractionModel) => {
+      const response = await fetch(OPENROUTER_CHAT, {
+        method: "POST",
+        headers: {
+          Authorization: openRouterAuthorization(key),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          model: model.id,
+          messages: [
+            {
+              role: "system",
+              content: model.structured
+                ? `${extractionRules}\nCRITICAL RETRY: Output exactly one valid JSON object. Do not include safety labels, analysis, markdown or prose before or after it.`
+                : extractionRules,
+            },
+            {
+              role: "user",
+              content: [
+                {
+                  type: "text",
+                  text: `Read ${data.fileName}. Extract every field and line item. The owner opened this from the ${data.expectedType || "general document"} intake. Use that only as context: preserve the document's actual semantics and never classify a customer purchase order as an invoice.`,
+                },
+                media,
+              ],
+            },
+          ],
+          ...(model.structured
+            ? {
+                response_format: { type: "json_object" },
+                provider: { require_parameters: true, allow_fallbacks: true },
+              }
+            : {}),
+          ...(data.mimeType === "application/pdf"
+            ? { plugins: [{ id: "file-parser", pdf: { engine: "cloudflare-ai" } }] }
+            : {}),
+          temperature: 0,
+          max_tokens: 12000,
+        }),
+      });
+      const raw = await response.text();
+      let result: any;
+      try {
+        result = JSON.parse(raw);
+      } catch {
+        throw new Error(`OpenRouter returned a non-JSON API response (${response.status})`);
+      }
+      if (!response.ok)
+        throw new Error(result?.error?.message || `OpenRouter returned ${response.status}`);
+      const content = openRouterMessageText(result?.choices?.[0]?.message?.content);
+      if (!content) throw new Error("TALA returned no extraction content");
+      return content;
+    };
+    const failures: string[] = [];
+    for (const model of extractionModels) {
+      try {
+        const content = await requestExtraction(model);
+        const parsed = parseExtractionText(content);
+        parsed.extractionModel = model.id;
+        return parsed;
+      } catch (error) {
+        failures.push(`${model.id}: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
+    return extractionNeedsReview(
+      data.expectedType,
+      `All compatible extraction models failed. ${failures.join(" | ")}`,
+    );
   });
 
 export async function extractCommercialDocument({

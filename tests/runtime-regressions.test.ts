@@ -91,6 +91,19 @@ test("PDF extraction uses OpenRouter's free file parser and preserves document s
   assert.match(agent, /expectedType/);
 });
 
+test("invalid OpenRouter extraction output retries and degrades to owner review", () => {
+  assert.match(agent, /parseExtractionText/);
+  assert.match(agent, /CRITICAL RETRY/);
+  assert.match(agent, /response_format/);
+  assert.match(agent, /extractionNeedsReview/);
+  assert.match(agent, /discoverExtractionModels/);
+  assert.match(agent, /input_modalities=image/);
+  assert.match(agent, /free_models_only/);
+  assert.match(agent, /All compatible extraction models failed/);
+  assert.match(route, /Extraction model/);
+  assert.doesNotMatch(agent, /throw new Error\(\s*`TALA returned invalid extraction JSON/);
+});
+
 test("document admin can add, edit, save and delete learned records", () => {
   assert.match(route, /Edit intelligence/);
   assert.match(route, /Add line/);
