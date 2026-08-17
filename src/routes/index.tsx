@@ -1232,10 +1232,15 @@ function Agent({ onClose }: any) {
   };
   const saveAgentSettings = async () => {
     setSettingsNotice("");
-    if (apiKey.trim()) {
-      saveOpenRouterSessionKey(apiKey);
-      setApiKey("");
-      setSecretConfigured(true);
+    try {
+      if (apiKey.trim()) {
+        saveOpenRouterSessionKey(apiKey);
+        setApiKey("");
+        setSecretConfigured(true);
+      }
+    } catch (reason: any) {
+      setSettingsNotice(reason?.message || "OpenRouter API key is invalid");
+      return;
     }
     const {
       data: { user },

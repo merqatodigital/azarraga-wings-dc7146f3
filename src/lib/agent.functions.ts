@@ -2,6 +2,7 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { TALA_INTENTS, type TalaIntent } from "@/lib/agent-quick-actions";
+import { normalizeOpenRouterApiKey, openRouterAuthorization } from "@/lib/openrouter-auth";
 import { normalizeOpenRouterModels } from "@/lib/openrouter-models";
 
 const OPENROUTER_MODELS = "https://openrouter.ai/api/v1/models";
@@ -23,7 +24,7 @@ function sessionKey() {
 
 export function saveOpenRouterSessionKey(value: string) {
   if (typeof window === "undefined") return;
-  const key = value.trim();
+  const key = normalizeOpenRouterApiKey(value);
   if (key) window.sessionStorage.setItem(SESSION_KEY, key);
   else window.sessionStorage.removeItem(SESSION_KEY);
 }
@@ -34,7 +35,7 @@ export function hasOpenRouterSessionKey() {
 
 function serverKey(inputKey?: string) {
   const configured = typeof process !== "undefined" ? process.env.OPENROUTER_API_KEY : undefined;
-  return inputKey?.trim() || configured || "";
+  return normalizeOpenRouterApiKey(inputKey || configured);
 }
 
 const listAgentModelsServer = createServerFn({ method: "GET" })
@@ -92,7 +93,7 @@ const askAgentServer = createServerFn({ method: "POST" })
     const response = await fetch(OPENROUTER_CHAT, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${key}`,
+        Authorization: openRouterAuthorization(key),
         "Content-Type": "application/json",
         "HTTP-Referer": "https://github.com/merqatodigital/azarraga-wings-dc7146f3",
         "X-Title": "Azarraga Commercial Agent",
@@ -173,7 +174,10 @@ const extractCommercialDocumentServer = createServerFn({ method: "POST" })
       : { type: "file", file: { filename: data.fileName, file_data: data.dataUrl } };
     const response = await fetch(OPENROUTER_CHAT, {
       method: "POST",
-      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      headers: {
+        Authorization: openRouterAuthorization(key),
+        "Content-Type": "application/json",
+      },
       body: JSON.stringify({
         model: "openrouter/free",
         messages: [
