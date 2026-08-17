@@ -23,21 +23,21 @@ const price = (value: unknown) => {
 
 export function normalizeOpenRouterModels(models: Array<Record<string, any>>) {
   const discovered = models
-    .filter((model) => model?.id)
+    .filter((model) => model?.["id"])
     .map((model): OpenRouterModel => {
-      const promptPrice = price(model?.pricing?.prompt);
-      const completionPrice = price(model?.pricing?.completion);
+      const promptPrice = price(model?.["pricing"]?.prompt);
+      const completionPrice = price(model?.["pricing"]?.completion);
+      const contextLength = Number(model["context_length"]);
       return {
-        id: String(model.id),
-        name: String(model.name || model.id),
-        contextLength: Number.isFinite(Number(model.context_length))
-          ? Number(model.context_length)
-          : null,
+        id: String(model["id"]),
+        name: String(model["name"] || model["id"]),
+        contextLength: Number.isFinite(contextLength) ? contextLength : null,
         free: promptPrice === 0 && completionPrice === 0,
         inputPricePerMillion: promptPrice * 1_000_000,
         outputPricePerMillion: completionPrice * 1_000_000,
       };
     });
+
   const unique = [
     OPENROUTER_FREE_ROUTER,
     ...discovered.filter((model) => model.id !== OPENROUTER_FREE_ROUTER.id),
