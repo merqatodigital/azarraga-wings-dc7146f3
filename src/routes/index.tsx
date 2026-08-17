@@ -47,7 +47,12 @@ import {
   type QuoteDraft,
 } from "@/lib/commercial-workflow";
 import { QuoteBuilder } from "@/components/commercial/QuoteBuilder";
-import { printCommercialDocument } from "@/lib/commercial-documents";
+import {
+  downloadCommercialDocumentPdf,
+  printCommercialDocument,
+  type CommercialDocument,
+} from "@/lib/commercial-documents";
+import { openRouterModelLabel } from "@/lib/openrouter-models";
 
 export const Route = createFileRoute("/")({ component: Home });
 const nav = [
@@ -239,11 +244,11 @@ function WorkspaceApp() {
       setBusy(false);
     }
   };
-  const uploadAndLearn = async (file: File) => {
+  const uploadAndLearn = async (file: File, category = "other") => {
     setBusy(true);
     setNotice(`Saving ${file.name} and teaching TALA…`);
     try {
-      const result: any = await uploadCommercialDocument(file, "other");
+      const result: any = await uploadCommercialDocument(file, category);
       const learning = result?.learning;
       const review = learning?.humanReviewRequired
         ? " Human review required for uncertain fields."
@@ -301,14 +306,14 @@ function WorkspaceApp() {
       lines: data || [],
     });
   };
-  const printInvoice = async (i: any) => {
+  const invoiceDocument = async (i: any): Promise<CommercialDocument> => {
     const { data, error } = await supabase
       .from("invoice_lines")
       .select("*")
       .eq("invoice_id", i.id)
       .order("line_no");
-    if (error) return setNotice(error.message);
-    printCommercialDocument({
+    if (error) throw new Error(`Load invoice lines: ${error.message}`);
+    return {
       number: i.invoice_number || "DRAFT",
       kind: "INVOICE",
       customer: i.customer_name || "",
@@ -321,7 +326,22 @@ function WorkspaceApp() {
       totalCentavos: i.total_centavos || 0,
       balanceCentavos: i.balance_centavos || 0,
       lines: data || [],
-    });
+    };
+  };
+  const printInvoice = async (i: any) => {
+    try {
+      printCommercialDocument(await invoiceDocument(i));
+    } catch (e: any) {
+      setNotice(e?.message || "Invoice could not be opened");
+    }
+  };
+  const downloadInvoice = async (i: any) => {
+    try {
+      downloadCommercialDocumentPdf(await invoiceDocument(i));
+      setNotice(`Invoice ${i.invoice_number || "draft"} downloaded as PDF`);
+    } catch (e: any) {
+      setNotice(e?.message || "Invoice download failed");
+    }
   };
   const due = invoices.reduce((s, x) => s + Number(x.balance_centavos || 0), 0),
     pipeline = quotes.reduce((s, x) => s + Number(x.total_centavos || 0), 0),
@@ -755,7 +775,26 @@ function WorkspaceApp() {
         {tab === "Invoices" && (
           <Page
             title="Invoices & payments"
-            text="Print invoices, record collections and track the remaining balance."
+            text="Download invoices, upload and extract invoice data, record collections and track balances."
+            action={
+              <label
+                className={`primary cursor-pointer ${busy ? "pointer-events-none opacity-60" : ""}`}
+              >
+                <Upload size={16} />
+                {busy ? "Extracting…" : "Upload & Extract Invoice"}
+                <input
+                  type="file"
+                  accept="image/*,application/pdf"
+                  className="hidden"
+                  disabled={busy}
+                  onChange={async (e) => {
+                    const file = e.target.files?.[0];
+                    e.currentTarget.value = "";
+                    if (file) await uploadAndLearn(file, "invoice");
+                  }}
+                />
+              </label>
+            }
           >
             <div className="space-y-3">
               {invoices.map((i) => (
@@ -777,6 +816,10 @@ function WorkspaceApp() {
                   <button onClick={() => printInvoice(i)} className="action">
                     <Printer size={15} />
                     Print
+                  </button>
+                  <button onClick={() => downloadInvoice(i)} className="action">
+                    <Download size={15} />
+                    Download PDF
                   </button>
                   <button
                     disabled={busy || Number(i.balance_centavos) <= 0}
@@ -1073,14 +1116,34 @@ function Agent({ onClose }: any) {
       { id: "openrouter/free", name: "OpenRouter Free Router", free: true },
     ]),
     [model, setModel] = useState("openrouter/free"),
+    [modelTier, setModelTier] = useState<"free" | "paid">("free"),
     [busy, setBusy] = useState(false),
-    [error, setError] = useState("");
+    [error, setError] = useState(""),
+    [secretConfigured, setSecretConfigured] = useState(false),
+    [settingsNotice, setSettingsNotice] = useState("");
   useEffect(() => {
-    listAgentModels()
-      .then((r: any) => {
-        if (r.models?.length) setModels(r.models);
-        if (r.models?.[0]?.id) setModel(r.models[0].id);
-        setError(r.error || "");
+    Promise.all([
+      listAgentModels(),
+      supabase.from("agent_settings").select("*").eq("id", 1).maybeSingle(),
+    ])
+      .then(([runtime, saved]: any[]) => {
+        const discovered = runtime.models?.length ? runtime.models : models;
+        setModels(discovered);
+        setSecretConfigured(Boolean(runtime.secretConfigured));
+        if (saved.error) setSettingsNotice(`Settings read failed: ${saved.error.message}`);
+        const savedTier: "free" | "paid" = saved.data?.free_models_only === false ? "paid" : "free";
+        const savedModel = saved.data?.model;
+        const validSavedModel = discovered.some(
+          (item: any) => item.id === savedModel && (savedTier === "free" ? item.free : !item.free),
+        );
+        setModelTier(savedTier);
+        setModel(
+          validSavedModel
+            ? savedModel
+            : discovered.find((item: any) => (savedTier === "free" ? item.free : !item.free))?.id ||
+                "openrouter/free",
+        );
+        setError(runtime.error || "");
       })
       .catch((reason: any) => setError(reason?.message || "Model discovery failed"));
   }, []);
@@ -1113,6 +1176,29 @@ function Agent({ onClose }: any) {
     documents: FileSearch,
     pricing: ReceiptText,
   };
+  const visibleModels = models.filter((item) => (modelTier === "free" ? item.free : !item.free));
+  const selectTier = (tier: "free" | "paid") => {
+    setModelTier(tier);
+    const first = models.find((item) => (tier === "free" ? item.free : !item.free));
+    if (first) setModel(first.id);
+  };
+  const saveAgentSettings = async () => {
+    setSettingsNotice("");
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) return setSettingsNotice("Sign in required");
+    const { error: saveError } = await supabase
+      .from("agent_settings")
+      .update({
+        provider: "openrouter",
+        model,
+        free_models_only: modelTier === "free",
+        updated_by: user.id,
+      })
+      .eq("id", 1);
+    setSettingsNotice(saveError ? `Save failed: ${saveError.message}` : "Agent settings saved");
+  };
   return (
     <aside className="fixed inset-y-0 right-0 z-50 flex w-full max-w-[390px] flex-col border-l bg-white shadow-2xl lg:static lg:z-auto lg:min-h-screen lg:shadow-none">
       <div className="flex items-center justify-between border-b p-5">
@@ -1137,18 +1223,64 @@ function Agent({ onClose }: any) {
         </p>
       </div>
       <div className="px-4">
-        <label className="text-xs font-bold">OPENROUTER MODEL</label>
+        <div className="mb-3 rounded-lg border bg-slate-50 p-3">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-xs font-bold">OPENROUTER CONNECTION</span>
+            <span
+              className={`text-xs font-bold ${secretConfigured ? "text-emerald-700" : "text-red-700"}`}
+            >
+              {secretConfigured ? "● Connected" : "● Not connected"}
+            </span>
+          </div>
+          <label className="mt-3 block text-[10px] font-bold text-slate-500">
+            API KEY · SUPABASE SECRET
+          </label>
+          <input
+            value={secretConfigured ? "••••••••••••••••••••••••" : "Secret not detected"}
+            readOnly
+            aria-label="OpenRouter API key status"
+            className="mt-1 w-full rounded-md border bg-white px-3 py-2 font-mono text-xs text-slate-500"
+          />
+          <p className="mt-1 text-[10px] text-slate-500">
+            The key stays encrypted in Supabase and is never sent to the browser.
+          </p>
+        </div>
+        <label className="text-xs font-bold">OPENROUTER MODEL SETTINGS</label>
+        <div className="mt-2 grid grid-cols-2 rounded-lg bg-slate-100 p-1 text-xs font-bold">
+          <button
+            onClick={() => selectTier("free")}
+            className={`rounded-md px-3 py-2 ${modelTier === "free" ? "bg-white text-[#0b5daf] shadow-sm" : "text-slate-500"}`}
+          >
+            Free models ({models.filter((item) => item.free).length})
+          </button>
+          <button
+            onClick={() => selectTier("paid")}
+            disabled={!models.some((item) => !item.free)}
+            className={`rounded-md px-3 py-2 disabled:opacity-40 ${modelTier === "paid" ? "bg-white text-[#0b5daf] shadow-sm" : "text-slate-500"}`}
+          >
+            Paid models ({models.filter((item) => !item.free).length})
+          </button>
+        </div>
         <select
           value={model}
           onChange={(e) => setModel(e.target.value)}
           className="mt-1 w-full rounded-lg border p-2 text-sm"
         >
-          {models.map((m) => (
+          {visibleModels.map((m) => (
             <option key={m.id} value={m.id}>
-              {m.name}
+              {openRouterModelLabel(m)}
             </option>
           ))}
         </select>
+        <button
+          onClick={saveAgentSettings}
+          className="mt-2 w-full rounded-lg border bg-white px-3 py-2 text-xs font-bold text-[#0b5daf]"
+        >
+          Save Agent Settings
+        </button>
+        {settingsNotice && (
+          <p className="mt-2 rounded-lg bg-slate-100 p-2 text-xs">{settingsNotice}</p>
+        )}
         {error && <p className="mt-2 rounded-lg bg-red-50 p-2 text-xs text-red-700">{error}</p>}
       </div>
       <div className="grid grid-cols-2 gap-2 p-4">

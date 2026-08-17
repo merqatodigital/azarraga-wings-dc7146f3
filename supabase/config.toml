@@ -2,3 +2,6 @@ project_id = "tktqpnhsysiblodyjrrw"
 
 [functions.tala-document-extract]
 verify_jwt = true
+
+[functions.tala-agent]
+verify_jwt = true
