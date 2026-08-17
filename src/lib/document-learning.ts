@@ -555,7 +555,7 @@ export async function learnCommercialDocument(
         unit_price_centavos: unitPrice,
         currency: "PHP",
         purchased_on: learned.docDate || null,
-        source_reference: learned.reference,
+        source_reference: learned.reference ?? null,
         source_document_id: source.id,
         created_by: user.id,
       }));
@@ -619,7 +619,9 @@ export async function learnCommercialDocument(
     }
   } else {
     await resetPriorExtraction(source.id);
-    const sourceReference = normalizedReference || learned.reference?.trim() || cd.title;
+    const sourceReference =
+      normalizedReference || learned.reference?.trim() || cd.title || "Uploaded document";
+
     const evidence = learned.lines.map((line, index) => {
       const quantity = Number.isFinite(Number(line.quantity)) ? Number(line.quantity) : 0;
       const unitPrice = Number.isInteger(Number(line.unitPriceCentavos))

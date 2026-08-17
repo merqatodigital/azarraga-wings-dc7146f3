@@ -75,14 +75,15 @@ export function QuoteBuilder({ open, busy, initial, onClose, onSubmit }: Props) 
     )
       return setError("Every product needs a description, quantity and valid price.");
     await onSubmit({
-      leadId: initial?.leadId,
+      ...(initial?.leadId ? { leadId: initial.leadId } : {}),
       customerName: customerName.trim(),
       projectName: projectName.trim(),
       location: location.trim() || "Palawan",
-      terms: terms.trim() || undefined,
-      leadTime: leadTime.trim() || undefined,
+      ...(terms.trim() ? { terms: terms.trim() } : {}),
+      ...(leadTime.trim() ? { leadTime: leadTime.trim() } : {}),
       lines,
     });
+
   };
   return (
     <div className="fixed inset-0 z-[70] overflow-y-auto bg-slate-950/55 p-4 sm:p-8">
@@ -179,13 +180,18 @@ export function QuoteBuilder({ open, busy, initial, onClose, onSubmit }: Props) 
                   <Num
                     label="Width mm"
                     value={line.widthMm || 0}
-                    onChange={(value: number) => patch(index, { widthMm: value || undefined })}
+                    onChange={(value: number) =>
+                      patch(index, value ? { widthMm: value } : { widthMm: 0 })
+                    }
                   />
                   <Num
                     label="Height mm"
                     value={line.heightMm || 0}
-                    onChange={(value: number) => patch(index, { heightMm: value || undefined })}
+                    onChange={(value: number) =>
+                      patch(index, value ? { heightMm: value } : { heightMm: 0 })
+                    }
                   />
+
                   <Num
                     label="Quantity"
                     value={line.quantity}

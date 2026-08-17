@@ -41,9 +41,10 @@ export type QuoteDraft = {
   leadTime?: string;
   lines: QuoteLineDraft[];
 };
-const fail = (label: string, error: any): never => {
+const fail: (label: string, error: any) => never = (label, error) => {
   throw new Error(`${label}: ${error?.message || String(error)}`);
 };
+
 
 export async function createLeadWorkflow(input: LeadDraft) {
   const {
@@ -562,7 +563,7 @@ export async function uploadCommercialDocument(
     path = `${user.id}/${Date.now()}-${safe}`;
   const { error: up } = await supabase.storage
     .from("commercial-documents")
-    .upload(path, file, { contentType: file.type || undefined, upsert: false });
+    .upload(path, file, { ...(file.type ? { contentType: file.type } : {}), upsert: false });
   if (up) fail("Upload document", up);
   const { data, error } = await supabase
     .from("client_documents")
@@ -659,7 +660,7 @@ export async function uploadCommercialDocument(
               ? "purchase_order"
               : undefined,
           reason,
-        ) as LearnedDocument,
+        ) as unknown as LearnedDocument,
       );
     } catch (reviewError) {
       console.error("[TALA review record]", reviewError);
