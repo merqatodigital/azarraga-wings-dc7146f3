@@ -76,6 +76,7 @@ export type LearnedDocument = {
   totalCentavos?: number;
   missingInformation?: string[];
   conflicts?: string[];
+  extractionModel?: string;
 };
 const fail = (label: string, e: any): never => {
   throw new Error(`${label}: ${e?.message || String(e)}`);
@@ -146,6 +147,11 @@ export async function learnCommercialDocument(
       throw new Error(`TALA returned no products. Previously saved product lines were preserved.`);
     }
   }
+  const reviewRequired = Boolean(
+    learned.missingInformation?.length ||
+    learned.conflicts?.length ||
+    learned.lines.some((line) => line.humanReviewRequired),
+  );
   const header = {
     doc_type: learned.docType,
     reference: normalizedReference,
@@ -172,19 +178,15 @@ export async function learnCommercialDocument(
     buyer_address: learned.buyer?.address || null,
     buyer_tin: learned.buyer?.tin || null,
     instructions: learned.instructions || null,
-    ingestion_status: options.humanReviewed ? "REVIEWED" : "LEARNED",
+    ingestion_status: options.humanReviewed
+      ? "REVIEWED"
+      : reviewRequired
+        ? "NEEDS_REVIEW"
+        : "LEARNED",
     extracted: learned,
     missing_information: learned.missingInformation || [],
     conflicts: learned.conflicts || [],
-    human_review_required: options.humanReviewed
-      ? false
-      : Boolean(
-          learned.missingInformation?.length ||
-          0 ||
-          learned.conflicts?.length ||
-          0 ||
-          learned.lines.some((x) => x.humanReviewRequired),
-        ),
+    human_review_required: options.humanReviewed ? false : reviewRequired,
     extraction_version: "tala-document-v1",
     learned_at: new Date().toISOString(),
     created_by: user.id,
@@ -228,6 +230,19 @@ export async function learnCommercialDocument(
       .update({ source_document_id: source.id })
       .eq("id", clientDocumentId);
     if (linkError) fail("Link source document", linkError);
+  }
+  // Keep uncertain OCR visible beside the private original, but do not teach TALA or
+  // mutate canonical customer, project, PO, invoice or pricing records until an owner
+  // explicitly reviews and saves the extraction.
+  if (!options.humanReviewed && reviewRequired) {
+    return {
+      sourceDocument: source,
+      customer: null,
+      project: null,
+      purchaseOrder: null,
+      learnedLines: learned.lines.length,
+      pendingReview: true,
+    };
   }
   let customer: any = null;
   if (learned.buyer?.name) {

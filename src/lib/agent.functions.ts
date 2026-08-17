@@ -324,15 +324,31 @@ export async function extractCommercialDocument({
   data,
 }: {
   data: {
-    fileName: string;
-    mimeType: string;
-    dataUrl: string;
+    clientDocumentId?: string;
+    fileName?: string;
+    mimeType?: string;
+    dataUrl?: string;
     expectedType?:
       "purchase_order" | "invoice" | "quotation" | "receipt" | "supplier_quote" | "unknown";
   };
 }) {
   if (!hasOpenRouterSessionKey()) {
-    return invokeTalaEdge("tala-document-extract", data);
+    if (!data.clientDocumentId)
+      throw new Error("Save the document before requesting secure TALA extraction");
+    return invokeTalaEdge("tala-document-extract", {
+      clientDocumentId: data.clientDocumentId,
+      expectedType: data.expectedType,
+    });
   }
-  return extractCommercialDocumentServer({ data: { ...data, apiKey: sessionKey() || undefined } });
+  if (!data.fileName || !data.mimeType || !data.dataUrl)
+    throw new Error("Document bytes are required when using a temporary session key");
+  return extractCommercialDocumentServer({
+    data: {
+      fileName: data.fileName,
+      mimeType: data.mimeType,
+      dataUrl: data.dataUrl,
+      expectedType: data.expectedType,
+      apiKey: sessionKey() || undefined,
+    },
+  });
 }

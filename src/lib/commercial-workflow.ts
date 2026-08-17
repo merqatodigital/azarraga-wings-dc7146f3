@@ -1,6 +1,7 @@
 import { supabase } from "@/integrations/supabase/client";
-import { extractCommercialDocument } from "@/lib/agent.functions";
+import { extractCommercialDocument, hasOpenRouterSessionKey } from "@/lib/agent.functions";
 import { learnCommercialDocument, type LearnedDocument } from "@/lib/document-learning";
+import { extractionNeedsReview } from "@/lib/extraction-json";
 import {
   calculateQuoteCommercialTotal,
   copyQuoteLinesToPurchaseOrder,
@@ -586,7 +587,6 @@ export async function uploadCommercialDocument(
     fail("Save document record", error);
   }
   try {
-    const dataUrl = await fileToDataUrl(file);
     const expectedType =
       category === "invoice"
         ? ("invoice" as const)
@@ -594,17 +594,31 @@ export async function uploadCommercialDocument(
           ? ("purchase_order" as const)
           : null;
     const learned = (await extractCommercialDocument({
-      data: {
-        fileName: file.name,
-        mimeType: file.type || "application/octet-stream",
-        dataUrl,
-        ...(expectedType ? { expectedType } : {}),
-      },
+      data: hasOpenRouterSessionKey()
+        ? {
+            clientDocumentId: data.id,
+            fileName: file.name,
+            mimeType: file.type || "application/octet-stream",
+            dataUrl: await fileToDataUrl(file),
+            ...(expectedType ? { expectedType } : {}),
+          }
+        : {
+            clientDocumentId: data.id,
+            ...(expectedType ? { expectedType } : {}),
+          },
     })) as LearnedDocument;
     const memory = await learnCommercialDocument(data.id, learned);
-    // The intake route is authoritative for workspace placement. Keep uploaded invoices
-    // in the Invoice register even when OCR classifies a difficult scan as unknown.
-    const persistedCategory = category === "invoice" ? "invoice" : learned.docType;
+    // Actual document semantics control the register. Only unresolved extraction remains in
+    // its intake register so the owner can find it and correct it beside the original.
+    const persistedCategory = memory?.pendingReview
+      ? category === "invoice" || learned.docType === "invoice"
+        ? "invoice_needs_review"
+        : "needs_review"
+      : learned.docType === "unknown"
+        ? category === "invoice"
+          ? "invoice_needs_review"
+          : "needs_review"
+        : learned.docType;
     const { data: updated, error: updateError } = await supabase
       .from("client_documents")
       .update({ category: persistedCategory })
@@ -615,7 +629,7 @@ export async function uploadCommercialDocument(
     return {
       ...updated,
       learning: {
-        status: "LEARNED",
+        status: memory?.pendingReview ? "NEEDS_REVIEW" : "LEARNED",
         documentType: learned.docType,
         reference: learned.reference,
         lines: learned.lines?.length || 0,
@@ -625,9 +639,31 @@ export async function uploadCommercialDocument(
           learned.lines?.some((x) => x.humanReviewRequired),
         ),
         memory,
+        ...(memory?.pendingReview
+          ? {
+              error: `TALA extracted ${learned.lines?.length || 0} line items. Review the extraction beside the original, then save corrections to teach commercial memory.`,
+            }
+          : {}),
       },
     };
   } catch (e: any) {
+    const reason = e?.message || String(e);
+    let reviewMemory: any = null;
+    try {
+      reviewMemory = await learnCommercialDocument(
+        data.id,
+        extractionNeedsReview(
+          category === "invoice"
+            ? "invoice"
+            : category === "purchase_order"
+              ? "purchase_order"
+              : undefined,
+          reason,
+        ) as LearnedDocument,
+      );
+    } catch (reviewError) {
+      console.error("[TALA review record]", reviewError);
+    }
     const failedCategory = category === "invoice" ? "invoice_needs_review" : "needs_review";
     const { data: updated } = await supabase
       .from("client_documents")
@@ -643,8 +679,8 @@ export async function uploadCommercialDocument(
         reference: null,
         lines: 0,
         humanReviewRequired: true,
-        memory: null,
-        error: `Document saved safely, but TALA learning needs review: ${e?.message || String(e)}`,
+        memory: reviewMemory,
+        error: `Document saved safely, but TALA learning needs review: ${reason}`,
       },
     };
   }
@@ -829,14 +865,6 @@ export async function archiveGeneratedInvoiceDocument(
 }
 
 export async function reprocessCommercialDocument(document: any) {
-  const { data, error } = await supabase.storage
-    .from(document.bucket)
-    .download(document.storage_path);
-  if (error) fail("Download document for reprocessing", error);
-  const file = new File([data], document.title || "commercial-document", {
-    type: document.mime_type || data.type || "application/octet-stream",
-  });
-  const dataUrl = await fileToDataUrl(file);
   const expectedType =
     document.category === "invoice" || document.category === "invoice_needs_review"
       ? ("invoice" as const)
@@ -844,12 +872,27 @@ export async function reprocessCommercialDocument(document: any) {
         ? ("purchase_order" as const)
         : null;
   const learned = (await extractCommercialDocument({
-    data: {
-      fileName: file.name,
-      mimeType: file.type,
-      dataUrl,
-      ...(expectedType ? { expectedType } : {}),
-    },
+    data: hasOpenRouterSessionKey()
+      ? await (async () => {
+          const { data, error } = await supabase.storage
+            .from(document.bucket)
+            .download(document.storage_path);
+          if (error) fail("Download document for reprocessing", error);
+          const file = new File([data], document.title || "commercial-document", {
+            type: document.mime_type || data.type || "application/octet-stream",
+          });
+          return {
+            clientDocumentId: document.id,
+            fileName: file.name,
+            mimeType: file.type,
+            dataUrl: await fileToDataUrl(file),
+            ...(expectedType ? { expectedType } : {}),
+          };
+        })()
+      : {
+          clientDocumentId: document.id,
+          ...(expectedType ? { expectedType } : {}),
+        },
   })) as LearnedDocument;
   if (!learned.lines?.length && document.source_document_id) {
     throw new Error(
@@ -857,7 +900,11 @@ export async function reprocessCommercialDocument(document: any) {
     );
   }
   const memory = await learnCommercialDocument(document.id, learned);
-  const persistedCategory = expectedType === "invoice" ? "invoice" : learned.docType;
+  const persistedCategory = memory?.pendingReview
+    ? expectedType === "invoice" || learned.docType === "invoice"
+      ? "invoice_needs_review"
+      : "needs_review"
+    : learned.docType;
   const { error: updateError } = await supabase
     .from("client_documents")
     .update({ category: persistedCategory })
@@ -871,13 +918,20 @@ export async function markCommercialDocumentReviewed(sourceDocumentId: string) {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) throw new Error("Sign in required");
-  const { error } = await supabase
+  const { data: source, error: sourceError } = await supabase
     .from("source_documents")
-    .update({
-      human_review_required: false,
-      ingestion_status: "REVIEWED",
-      notes: `Reviewed by owner ${user.id}`,
-    })
-    .eq("id", sourceDocumentId);
-  if (error) fail("Review document intelligence", error);
+    .select("id,extracted")
+    .eq("id", sourceDocumentId)
+    .single();
+  if (sourceError || !source) fail("Load document intelligence", sourceError || "Not found");
+  const { data: document, error: documentError } = await supabase
+    .from("client_documents")
+    .select("id")
+    .eq("source_document_id", sourceDocumentId)
+    .single();
+  if (documentError || !document) fail("Load original document", documentError || "Not found");
+  const learned = source.extracted as LearnedDocument;
+  if (!learned || !Array.isArray(learned.lines))
+    throw new Error("This document has no extraction to review. Reprocess it first.");
+  return learnCommercialDocument(document.id, learned, { humanReviewed: true });
 }

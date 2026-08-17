@@ -59,9 +59,10 @@ test("invoice intake remains visible and opens its intelligence after upload", (
   assert.match(route, /document\.mime_type\?\.startsWith\("image\/"\)/);
 });
 
-test("invoice intake category survives uncertain OCR classification", () => {
-  assert.match(workflow, /category === "invoice" \? "invoice" : learned\.docType/);
-  assert.match(workflow, /expectedType === "invoice" \? "invoice" : learned\.docType/);
+test("invoice intake remains reviewable while actual document semantics win after approval", () => {
+  assert.match(workflow, /invoice_needs_review/);
+  assert.match(workflow, /learned\.docType === "invoice"/);
+  assert.match(workflow, /: learned\.docType/);
   assert.match(route, /Account name/);
   assert.match(route, /Invoice date/);
   assert.match(route, /Scope of work extracted/);
@@ -121,8 +122,23 @@ test("secret-bearing edge extractor discovers vision models and rejects empty OC
   assert.match(extractor, /response_format/);
   assert.match(extractor, /parseExtractionText/);
   assert.match(extractor, /Every compatible extraction model failed/);
+  assert.match(extractor, /body\.clientDocumentId/);
+  assert.match(extractor, /from\("client_documents"\)/);
+  assert.match(extractor, /download\(document\.storage_path\)/);
+  assert.match(extractor, /SUPABASE_SERVICE_ROLE_KEY/);
+  assert.doesNotMatch(extractor, /body\.dataUrl/);
   assert.match(parser, /empty extraction contained no document identity or line items/);
   assert.match(parser, /extracted line items contained no readable descriptions/);
+});
+
+test("uncertain OCR is reviewable but cannot teach canonical commercial memory", () => {
+  assert.match(learning, /ingestion_status:[\s\S]*"NEEDS_REVIEW"/);
+  assert.match(learning, /if \(!options\.humanReviewed && reviewRequired\)/);
+  assert.match(learning, /pendingReview: true/);
+  assert.match(
+    workflow,
+    /learnCommercialDocument\(document\.id, learned, \{ humanReviewed: true \}\)/,
+  );
 });
 
 test("document admin can add, edit, save and delete learned records", () => {

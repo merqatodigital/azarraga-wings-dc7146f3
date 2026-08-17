@@ -10,6 +10,7 @@ const cors = {
 };
 const respond = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: cors });
+const MAX_DOCUMENT_BYTES = 20 * 1024 * 1024;
 const rules = `Extract every legible field and every line item from this Azarraga Glass & Aluminum commercial document. Do not summarize or invent. Return JSON only:
 {"docType":"purchase_order|invoice|quotation|receipt|supplier_quote|unknown","reference":null,"docDate":null,"expectedDate":null,"mrsNumber":null,"prNumber":null,"prsNumber":null,"paymentTerms":null,"paymentMilestones":[{"percent":null,"trigger":null,"rawText":""}],"deliverySchedule":null,"contractType":null,"warranty":null,"serviceScope":null,"memo":null,"transactionId":null,"supplier":{"name":null,"address":null,"tin":null,"contactPerson":null,"email":null,"phone":null},"buyer":{"name":null,"businessStyle":null,"address":null,"tin":null,"contactPerson":null,"email":null,"phone":null},"project":{"name":null,"location":null},"instructions":null,"lines":[{"lineNo":1,"openingCode":null,"quantity":1,"unit":"SET","rawDescription":"","productFamily":null,"system":null,"configuration":null,"glassThicknessMm":null,"glassType":null,"glassColor":null,"frameColor":null,"widthMm":null,"heightMm":null,"rawDimensions":null,"hardware":[],"class":null,"unitPriceCentavos":null,"vatCentavos":null,"amountCentavos":null,"confidence":1,"humanReviewRequired":false}],"adjustments":[{"type":"CRATING|SHIPPING|TRUCKING|DELIVERY|INSTALLATION|DISCOUNT|OTHER","description":"","amountCentavos":0,"rawText":""}],"financialSummary":{"subtotalCentavos":null,"amountWithoutTaxCentavos":null,"vatCentavos":null,"totalCentavos":null},"totalCentavos":null,"missingInformation":[],"conflicts":[]}.
 Amounts are integer centavos. Preserve exact raw descriptions, scope, instructions and raw dimensions. Normalize dimensions to millimeters only when clearly stated. Preserve opening codes. Separate VAT, crating, shipping, trucking, delivery, installation and discounts from product lines. The document issuer/buyer is the customer account; the party named TO/vendor/supplier is the supplier. A customer's PO addressed to Azarraga is purchase_order, never an Azarraga invoice. Capture business style, TIN, email and phone only when printed. Store PR, PRS and MRS in their matching fields. Preserve payment milestones, delivery schedule, contract type and warranty verbatim. Do not add VAT twice: financialSummary must reflect the printed subtotal/amount without tax/VAT/total, while line amounts remain exactly as printed. If printed line totals and tax presentation are ambiguous, preserve both and add a conflict instead of changing the figures. Unreadable fields are null and listed in missingInformation. Ambiguity requires humanReviewRequired=true.`;
@@ -21,6 +22,71 @@ function messageText(content: unknown) {
     .map((part: any) => (typeof part === "string" ? part : String(part?.text || "")))
     .filter(Boolean)
     .join("\n");
+}
+
+function bytesToBase64(bytes: Uint8Array) {
+  const encoded: string[] = [];
+  // 24 KiB is divisible by three, so complete chunks never contain base64 padding.
+  const chunkSize = 24 * 1024;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    const chunk = bytes.subarray(offset, Math.min(offset + chunkSize, bytes.length));
+    let binary = "";
+    for (let index = 0; index < chunk.length; index += 1)
+      binary += String.fromCharCode(chunk[index]);
+    encoded.push(btoa(binary));
+  }
+  return encoded.join("");
+}
+
+async function loadAuthorizedDocument(
+  supabase: ReturnType<typeof createClient>,
+  userId: string,
+  clientDocumentId: string,
+) {
+  const { data: document, error: documentError } = await supabase
+    .from("client_documents")
+    .select("id,bucket,storage_path,title,mime_type,file_size,created_by")
+    .eq("id", clientDocumentId)
+    .single();
+  if (documentError || !document)
+    throw new Error(
+      `Document is unavailable or unauthorized: ${documentError?.message || "not found"}`,
+    );
+  if (document.created_by !== userId) {
+    const { data: adminRole, error: roleError } = await supabase
+      .from("user_roles")
+      .select("role")
+      .eq("user_id", userId)
+      .eq("role", "admin")
+      .maybeSingle();
+    if (roleError || !adminRole) throw new Error("Document is not authorized for this owner");
+  }
+  if (Number(document.file_size || 0) > MAX_DOCUMENT_BYTES)
+    throw new Error("Document exceeds the 20 MB extraction limit");
+  const secretKey =
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || Deno.env.get("SUPABASE_SECRET_KEY") || "";
+  if (!secretKey)
+    throw new Error("Supabase server secret is unavailable to the extraction function");
+  const admin = createClient(Deno.env.get("SUPABASE_URL") || "", secretKey, {
+    auth: { persistSession: false },
+  });
+  const { data: file, error: downloadError } = await admin.storage
+    .from(document.bucket)
+    .download(document.storage_path);
+  if (downloadError || !file)
+    throw new Error(`Private document download failed: ${downloadError?.message || "empty file"}`);
+  if (file.size > MAX_DOCUMENT_BYTES)
+    throw new Error("Document exceeds the 20 MB extraction limit");
+  const mimeType = String(document.mime_type || file.type || "").toLowerCase();
+  if (!mimeType.startsWith("image/") && mimeType !== "application/pdf")
+    throw new Error("Only image and PDF documents are supported");
+  const fileName = String(document.title || document.storage_path.split("/").pop() || "document");
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  return {
+    fileName,
+    mimeType,
+    dataUrl: `data:${mimeType};base64,${bytesToBase64(bytes)}`,
+  };
 }
 
 async function extractionModels(
@@ -99,13 +165,16 @@ Deno.serve(async (req) => {
         503,
       );
     const body = await req.json();
-    if (!body.fileName || !body.mimeType || !body.dataUrl)
-      return respond({ error: "Filename, MIME type and document content are required" }, 400);
-    if (!String(body.mimeType).startsWith("image/") && body.mimeType !== "application/pdf")
-      return respond({ error: "Only image and PDF documents are supported" }, 415);
-    const media = String(body.mimeType).startsWith("image/")
-      ? { type: "image_url", image_url: { url: body.dataUrl } }
-      : { type: "file", file: { filename: body.fileName, file_data: body.dataUrl } };
+    if (!body.clientDocumentId)
+      return respond({ error: "A saved client document ID is required" }, 400);
+    const document = await loadAuthorizedDocument(
+      supabase,
+      auth.user.id,
+      String(body.clientDocumentId),
+    );
+    const media = document.mimeType.startsWith("image/")
+      ? { type: "image_url", image_url: { url: document.dataUrl } }
+      : { type: "file", file: { filename: document.fileName, file_data: document.dataUrl } };
     const { data: settings } = await supabase
       .from("agent_settings")
       .select("model,free_models_only")
@@ -113,7 +182,7 @@ Deno.serve(async (req) => {
       .maybeSingle();
     const models = await extractionModels(
       key,
-      String(body.mimeType),
+      document.mimeType,
       settings?.model || null,
       settings?.free_models_only !== false,
     );
@@ -142,7 +211,7 @@ Deno.serve(async (req) => {
                 content: [
                   {
                     type: "text",
-                    text: `Read ${body.fileName}. Extract every visible field, account, price, dimension, line item and scope item. ${body.expectedType ? `This came from the ${body.expectedType} intake, but preserve its actual document semantics.` : ""}`,
+                    text: `Read ${document.fileName}. Extract every visible field, account, price, dimension, line item and scope item. ${body.expectedType ? `This came from the ${body.expectedType} intake, but preserve its actual document semantics.` : ""}`,
                   },
                   media,
                 ],
@@ -154,7 +223,7 @@ Deno.serve(async (req) => {
                   provider: { require_parameters: true, allow_fallbacks: true },
                 }
               : {}),
-            ...(body.mimeType === "application/pdf"
+            ...(document.mimeType === "application/pdf"
               ? { plugins: [{ id: "file-parser", pdf: { engine: "cloudflare-ai" } }] }
               : {}),
             temperature: 0,
