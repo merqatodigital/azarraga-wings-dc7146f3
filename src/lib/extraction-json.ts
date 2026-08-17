@@ -50,7 +50,6 @@ function extractJsonWithPrefix(text: string): string[] {
 }
 
 function salvageExtraction(text: string): any {
-  // Try to extract key fields with regex
   const docTypeMatch = text.match(/(?:docType|document type|type)[\s:]+["']?([a-z_]+)["']?/i);
   const refMatch = text.match(/(?:reference|number|document no|invoice no|po no|quote no)[\s:]+["']?([A-Z0-9-]+)["']?/i);
   const dateMatch = text.match(/(?:date|doc date|invoice date|po date)[\s:]+["']?([0-9/ -]+)["']?/i);
@@ -129,7 +128,6 @@ function normalizeExtraction(value: any) {
     : [];
   value.conflicts = Array.isArray(value.conflicts) ? value.conflicts : [];
   
-  // Ensure customer object exists
   if (!value.customer) value.customer = {};
   if (!value.project) value.project = {};
   if (!value.financialSummary) value.financialSummary = {};
@@ -146,7 +144,6 @@ function normalizeExtraction(value: any) {
     throw new Error("empty extraction contained no document identity or line items");
   }
   
-  // If we have lines but no descriptions, flag for review
   if (value.lines.length && !value.lines.some((line: any) => line.rawDescription.trim())) {
     value.missingInformation.push("Extracted lines have no readable descriptions");
     value.lines.forEach((line: any) => {
@@ -154,7 +151,6 @@ function normalizeExtraction(value: any) {
     });
   }
   
-  // Validate totals
   const calculatedTotal = value.lines.reduce((sum: number, line: any) => 
     sum + (Number(line.amountCentavos) || 0), 0
   );
@@ -169,12 +165,7 @@ function normalizeExtraction(value: any) {
   return value;
 }
 
-// ============================================================
-// MAIN PARSE FUNCTION
-// ============================================================
-
 export function parseExtractionText(text: string) {
-  // Clean the text
   let cleaned = text
     .trim()
     .replace(/^```json\s*/i, '')
@@ -183,7 +174,6 @@ export function parseExtractionText(text: string) {
     .replace(/^["']+|["']+$/g, '')
     .trim();
 
-  // Try multiple parsing strategies
   const candidates = [
     cleaned,
     ...balancedJsonObjects(cleaned),
@@ -202,7 +192,6 @@ export function parseExtractionText(text: string) {
     }
   }
 
-  // Try to salvage data from the text
   const salvaged = salvageExtraction(cleaned);
   if (salvaged) {
     return normalizeExtraction(salvaged);
@@ -210,10 +199,6 @@ export function parseExtractionText(text: string) {
 
   throw new Error(lastError instanceof Error ? lastError.message : String(lastError));
 }
-
-// ============================================================
-// REVIEW DOCUMENT FOR FAILED EXTRACTIONS
-// ============================================================
 
 export function extractionNeedsReview(expectedType: string | undefined, reason: string) {
   const safeReason = reason.replace(/\s+/g, " ").trim().slice(0, 500);
