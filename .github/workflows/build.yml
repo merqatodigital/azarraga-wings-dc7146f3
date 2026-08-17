@@ -1,4 +1,4 @@
-name: Production Build
+name: Build Verification
 on:
   push:
     branches: [main]

@@ -5,6 +5,7 @@ import { TALA_INTENTS, type TalaIntent } from "@/lib/agent-quick-actions";
 import { normalizeOpenRouterApiKey, openRouterAuthorization } from "@/lib/openrouter-auth";
 import { normalizeOpenRouterModels } from "@/lib/openrouter-models";
 import { extractionNeedsReview, parseExtractionText } from "@/lib/extraction-json";
+import { invokeTalaEdge, isMissingTalaEdge } from "@/lib/tala-edge";
 
 const OPENROUTER_MODELS = "https://openrouter.ai/api/v1/models";
 const OPENROUTER_CHAT = "https://openrouter.ai/api/v1/chat/completions";
@@ -57,8 +58,22 @@ const listAgentModelsServer = createServerFn({ method: "GET" })
   });
 
 export async function listAgentModels() {
+  if (!hasOpenRouterSessionKey()) {
+    try {
+      return await invokeTalaEdge<any>("tala-agent", { action: "models" });
+    } catch (error) {
+      if (!isMissingTalaEdge(error)) throw error;
+    }
+  }
   const result: any = await listAgentModelsServer();
-  return { ...result, secretConfigured: result.secretConfigured || hasOpenRouterSessionKey() };
+  return {
+    ...result,
+    secretConfigured: result.secretConfigured || hasOpenRouterSessionKey(),
+    error:
+      result.secretConfigured || hasOpenRouterSessionKey()
+        ? result.error
+        : "TALA service is not deployed. A pasted session key can be used until deployment completes.",
+  };
 }
 
 const AskInput = z.object({
@@ -127,6 +142,9 @@ export async function askAgent({
 }: {
   data: { message: string; model: string; intent: TalaIntent };
 }) {
+  if (!hasOpenRouterSessionKey()) {
+    return invokeTalaEdge("tala-agent", { action: "chat", ...data });
+  }
   return askAgentServer({ data: { ...data, apiKey: sessionKey() || undefined } });
 }
 
@@ -313,5 +331,8 @@ export async function extractCommercialDocument({
       "purchase_order" | "invoice" | "quotation" | "receipt" | "supplier_quote" | "unknown";
   };
 }) {
+  if (!hasOpenRouterSessionKey()) {
+    return invokeTalaEdge("tala-document-extract", data);
+  }
   return extractCommercialDocumentServer({ data: { ...data, apiKey: sessionKey() || undefined } });
 }

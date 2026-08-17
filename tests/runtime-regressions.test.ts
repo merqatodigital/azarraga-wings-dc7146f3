@@ -11,8 +11,11 @@ const workflow = readFileSync(
 );
 const learning = readFileSync(new URL("../src/lib/document-learning.ts", import.meta.url), "utf8");
 
-test("TALA runtime does not depend on undeployed Supabase functions", () => {
-  assert.doesNotMatch(agent, /supabase\.functions\.invoke/);
+test("TALA uses secret-bearing Supabase functions and keeps a session-key fallback", () => {
+  const edge = readFileSync(new URL("../src/lib/tala-edge.ts", import.meta.url), "utf8");
+  assert.match(edge, /supabase\.functions\.invoke/);
+  assert.match(agent, /invokeTalaEdge\("tala-agent"/);
+  assert.match(agent, /invokeTalaEdge\("tala-document-extract"/);
   assert.match(agent, /saveOpenRouterSessionKey/);
   assert.match(agent, /process\.env[\s\S]*OPENROUTER_API_KEY/);
   assert.doesNotMatch(agent, /import\.meta.*OPENROUTER_API_KEY/);
@@ -102,6 +105,24 @@ test("invalid OpenRouter extraction output retries and degrades to owner review"
   assert.match(agent, /All compatible extraction models failed/);
   assert.match(route, /Extraction model/);
   assert.doesNotMatch(agent, /throw new Error\(\s*`TALA returned invalid extraction JSON/);
+});
+
+test("secret-bearing edge extractor discovers vision models and rejects empty OCR", () => {
+  const extractor = readFileSync(
+    new URL("../supabase/functions/tala-document-extract/index.ts", import.meta.url),
+    "utf8",
+  );
+  const parser = readFileSync(
+    new URL("../supabase/functions/_shared/extraction-json.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(extractor, /Deno\.env\.get\("OPENROUTER_API_KEY"\)/);
+  assert.match(extractor, /input_modalities=image/);
+  assert.match(extractor, /response_format/);
+  assert.match(extractor, /parseExtractionText/);
+  assert.match(extractor, /Every compatible extraction model failed/);
+  assert.match(parser, /empty extraction contained no document identity or line items/);
+  assert.match(parser, /extracted line items contained no readable descriptions/);
 });
 
 test("document admin can add, edit, save and delete learned records", () => {
