@@ -777,6 +777,11 @@ export async function reprocessCommercialDocument(document: any) {
       ...(expectedType ? { expectedType } : {}),
     },
   })) as LearnedDocument;
+  if (!learned.lines?.length && document.source_document_id) {
+    throw new Error(
+      "TALA returned no product lines. Existing document intelligence was preserved; review the original or try Reprocess again.",
+    );
+  }
   const memory = await learnCommercialDocument(document.id, learned);
   const persistedCategory = expectedType === "invoice" ? "invoice" : learned.docType;
   const { error: updateError } = await supabase

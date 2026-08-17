@@ -111,6 +111,41 @@ export async function learnCommercialDocument(
     .single();
   if (cde) fail("Load uploaded document", cde);
   if (!cd) throw new Error("Uploaded document was not found");
+  if (cd.source_document_id && learned.lines.length === 0) {
+    const [existingSourceResult, purchaseLineResult, purchasedItemResult] = await Promise.all([
+      supabase
+        .from("source_documents")
+        .select("extracted")
+        .eq("id", cd.source_document_id)
+        .single(),
+      supabase
+        .from("purchase_order_lines")
+        .select("id")
+        .eq("source_document_id", cd.source_document_id)
+        .limit(1),
+      supabase
+        .from("items_purchased")
+        .select("id")
+        .eq("source_document_id", cd.source_document_id)
+        .limit(1),
+    ]);
+    const protectionError = [existingSourceResult, purchaseLineResult, purchasedItemResult].find(
+      (result) => result.error,
+    )?.error;
+    if (protectionError) fail("Protect existing learned products", protectionError);
+    const existingSource = existingSourceResult.data;
+    const existingLines = Array.isArray((existingSource?.extracted as any)?.lines)
+      ? (existingSource?.extracted as any).lines
+      : [];
+    const savedProductCount = Math.max(
+      existingLines.length,
+      purchaseLineResult.data?.length || 0,
+      purchasedItemResult.data?.length || 0,
+    );
+    if (savedProductCount) {
+      throw new Error(`TALA returned no products. Previously saved product lines were preserved.`);
+    }
+  }
   const header = {
     doc_type: learned.docType,
     reference: normalizedReference,

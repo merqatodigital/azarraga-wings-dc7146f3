@@ -126,7 +126,7 @@ test("secret-bearing edge extractor discovers vision models and rejects empty OC
 });
 
 test("document admin can add, edit, save and delete learned records", () => {
-  assert.match(route, /Edit intelligence/);
+  assert.match(route, /Edit products/);
   assert.match(route, /Add line/);
   assert.match(route, /Save corrections & teach TALA/);
   assert.match(route, /deleteCommercialDocument/);
@@ -140,4 +140,19 @@ test("private originals render through authenticated blob access instead of fram
   assert.match(route, /URL\.createObjectURL\(blob\)/);
   assert.doesNotMatch(route, /openExternalDocument/);
   assert.match(route, /authenticated private Storage access/);
+});
+
+test("failed OCR and empty edits cannot erase previously saved products", () => {
+  assert.match(learning, /TALA returned no products[\s\S]*product lines were preserved/);
+  assert.match(workflow, /Existing document intelligence was preserved/);
+  assert.match(route, /Products cannot be replaced with an empty list/);
+  assert.match(route, /purchaseOrder\.purchase_order_lines/);
+  assert.match(route, /Saved products remain visible after refresh and failed reprocessing/);
+});
+
+test("document rows use focused actions while destructive tools remain in More actions", () => {
+  assert.match(route, /More actions/);
+  assert.match(route, /Reprocess safely/);
+  assert.match(route, /Delete document/);
+  assert.match(route, /Products ordered \(\{lines\.length\}\)/);
 });

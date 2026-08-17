@@ -1193,6 +1193,12 @@ function WorkspaceApp() {
             sources.find((s) => s.id === documentOpen.document.source_document_id) ||
             documentOpen.source
           }
+          purchaseOrder={pos.find(
+            (item) => item.source_document_id === documentOpen.document.source_document_id,
+          )}
+          learnedItems={learnedItems.filter(
+            (item) => item.source_document_id === documentOpen.document.source_document_id,
+          )}
           busy={busy}
           close={() => setDocumentOpen(null)}
           initialEdit={Boolean(documentOpen.edit)}
@@ -1684,8 +1690,8 @@ function DocumentRow({ document, source, busy, open, edit, run }: any) {
       <td className="px-5 py-4">
         <div className="flex flex-wrap gap-2" onClick={(event) => event.stopPropagation()}>
           <button onClick={open} className="action">
-            <ExternalLink size={14} />
-            Open
+            <Eye size={14} />
+            {source?.human_review_required ? "Review" : "View details"}
           </button>
           <button
             onClick={() => run(() => downloadCommercialDocument(document), "Download started")}
@@ -1693,58 +1699,6 @@ function DocumentRow({ document, source, busy, open, edit, run }: any) {
           >
             <Download size={14} />
             Download
-          </button>
-          <button onClick={open} className="action">
-            <Eye size={14} />
-            Intelligence
-          </button>
-          {document.category !== "generated_invoice" && (
-            <>
-              <button disabled={busy} onClick={edit} className="action">
-                <Pencil size={14} />
-                Edit
-              </button>
-              <button
-                disabled={busy}
-                onClick={() =>
-                  run(() => reprocessCommercialDocument(document), "Document reprocessed")
-                }
-                className="action"
-              >
-                <RotateCw size={14} />
-                Reprocess
-              </button>
-            </>
-          )}
-          {source?.human_review_required && (
-            <button
-              disabled={busy}
-              onClick={() =>
-                run(() => markCommercialDocumentReviewed(source.id), "Document marked reviewed")
-              }
-              className="action"
-            >
-              <CheckCircle2 size={14} />
-              Review
-            </button>
-          )}
-          <button
-            disabled={busy}
-            onClick={() => {
-              if (
-                window.confirm(
-                  `Delete ${document.title || "this document"}, its private original, and all TALA memory learned only from it?`,
-                )
-              )
-                run(
-                  () => deleteCommercialDocument(document),
-                  "Document and learned memory deleted",
-                );
-            }}
-            className="action text-red-700"
-          >
-            <Trash2 size={14} />
-            Delete
           </button>
         </div>
       </td>
@@ -1880,6 +1834,10 @@ function DocumentIntelligenceEditor({ document, source, busy, cancel, save }: an
     }));
     if (lines.some((line: any) => !line.rawDescription))
       return window.alert("Every line item needs a raw description");
+    if (initial.lines?.length && !lines.length)
+      return window.alert(
+        "Products cannot be replaced with an empty list. Keep at least one product or delete the document separately.",
+      );
     save(title.trim(), { ...draft, lines });
   };
   return (
@@ -2205,6 +2163,8 @@ function DocumentIntelligence({
   document,
   source,
   invoice,
+  purchaseOrder,
+  learnedItems,
   busy,
   close,
   run,
@@ -2256,7 +2216,36 @@ function DocumentIntelligence({
       });
   }, [invoice?.id]);
   const extracted = source?.extracted || {};
-  const lines = Array.isArray(extracted.lines) ? extracted.lines : [];
+  const extractedLines = Array.isArray(extracted.lines) ? extracted.lines : [];
+  const persistedRows = purchaseOrder?.purchase_order_lines?.length
+    ? purchaseOrder.purchase_order_lines
+    : learnedItems || [];
+  const persistedLines = persistedRows.map((line: any, index: number) => ({
+    lineNo: line.line_no || index + 1,
+    openingCode: line.opening_code || null,
+    rawDescription: line.raw_description || line.description || "",
+    productFamily: line.product_family || null,
+    system: line.system || null,
+    configuration: line.configuration || null,
+    quantity: Number(line.quantity || 0),
+    unit: line.unit || "SET",
+    widthMm: line.width_mm || null,
+    heightMm: line.height_mm || null,
+    rawDimensions: line.raw_dimensions || null,
+    glassThicknessMm: line.glass_thickness_mm || null,
+    glassType: line.glass_type || line.glass || null,
+    glassColor: line.glass_color || null,
+    frameColor: line.frame_color || null,
+    hardware: Array.isArray(line.hardware) ? line.hardware : [],
+    class: line.class || null,
+    unitPriceCentavos: line.unit_price_centavos ?? null,
+    vatCentavos: line.vat_centavos ?? null,
+    amountCentavos:
+      line.amount_centavos ?? Number(line.quantity || 0) * Number(line.unit_price_centavos || 0),
+    confidence: line.confidence ?? null,
+    humanReviewRequired: line.human_review_required ?? false,
+  }));
+  const lines = extractedLines.length ? extractedLines : persistedLines;
   const adjustments = Array.isArray(extracted.adjustments) ? extracted.adjustments : [];
   const adjustment = (type: string) =>
     adjustments
@@ -2289,50 +2278,58 @@ function DocumentIntelligence({
               <ExternalLink size={15} />
               Open Original
             </button>
-            <button
-              onClick={() => run(() => downloadCommercialDocument(document), "Download started")}
-              className="action"
-            >
-              <Download size={15} />
-              Download
-            </button>
             {!invoice && (
               <button disabled={busy} onClick={() => setEditing(true)} className="action">
                 <Pencil size={15} />
-                Edit intelligence
+                Edit products
               </button>
             )}
-            <button
-              disabled={busy}
-              onClick={() => {
-                if (
-                  window.confirm(
-                    `Delete ${document.title || "this document"}, its private original, and all TALA memory learned only from it?`,
-                  )
-                )
-                  run(
-                    () => deleteCommercialDocument(document),
-                    "Document and learned memory deleted",
-                    changed,
-                  );
-              }}
-              className="action text-red-700"
-            >
-              <Trash2 size={15} />
-              Delete
-            </button>
-            {!invoice && (
-              <button
-                disabled={busy}
-                onClick={() =>
-                  run(() => reprocessCommercialDocument(document), "Document reprocessed", close)
-                }
-                className="action"
-              >
-                <RotateCw size={15} />
-                Reprocess
-              </button>
-            )}
+            <details className="relative">
+              <summary className="action cursor-pointer list-none">More actions</summary>
+              <div className="absolute right-0 z-20 mt-2 grid min-w-48 gap-1 rounded-lg border bg-white p-2 shadow-xl">
+                <button
+                  onClick={() =>
+                    run(() => downloadCommercialDocument(document), "Download started")
+                  }
+                  className="action justify-start"
+                >
+                  <Download size={15} /> Download
+                </button>
+                {!invoice && (
+                  <button
+                    disabled={busy}
+                    onClick={() =>
+                      run(
+                        () => reprocessCommercialDocument(document),
+                        "Document reprocessed",
+                        close,
+                      )
+                    }
+                    className="action justify-start"
+                  >
+                    <RotateCw size={15} /> Reprocess safely
+                  </button>
+                )}
+                <button
+                  disabled={busy}
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        `Delete ${document.title || "this document"}, its private original, and all TALA memory learned only from it?`,
+                      )
+                    )
+                      run(
+                        () => deleteCommercialDocument(document),
+                        "Document and learned memory deleted",
+                        changed,
+                      );
+                  }}
+                  className="action justify-start text-red-700"
+                >
+                  <Trash2 size={15} /> Delete document
+                </button>
+              </div>
+            </details>
             {source?.human_review_required && (
               <button
                 disabled={busy}
@@ -2394,7 +2391,7 @@ function DocumentIntelligence({
             {editing && !invoice ? (
               <DocumentIntelligenceEditor
                 document={document}
-                source={source}
+                source={{ ...source, extracted: { ...extracted, lines } }}
                 busy={busy}
                 cancel={() => setEditing(false)}
                 save={(title: string, learned: any) =>
@@ -2584,10 +2581,9 @@ function DocumentIntelligence({
                 </div>
                 <div className="overflow-x-auto rounded-xl border bg-white">
                   <div className="border-b px-5 py-4">
-                    <b>Every extracted line item</b>
+                    <b>Products ordered ({lines.length})</b>
                     <p className="text-xs text-slate-500">
-                      Raw descriptions remain visible so you can compare them directly with the
-                      original.
+                      Saved products remain visible after refresh and failed reprocessing.
                     </p>
                   </div>
                   <table className="min-w-[2100px] text-left text-xs">
