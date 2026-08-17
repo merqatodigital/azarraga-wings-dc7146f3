@@ -368,6 +368,63 @@ export type Database = {
           },
         ]
       }
+      document_financial_adjustments: {
+        Row: {
+          adjustment_type: string
+          amount_centavos: number
+          created_at: string
+          created_by: string | null
+          currency: string
+          description: string
+          id: string
+          line_no: number | null
+          purchase_order_id: string | null
+          raw_text: string | null
+          source_document_id: string
+        }
+        Insert: {
+          adjustment_type: string
+          amount_centavos: number
+          created_at?: string
+          created_by?: string | null
+          currency?: string
+          description: string
+          id?: string
+          line_no?: number | null
+          purchase_order_id?: string | null
+          raw_text?: string | null
+          source_document_id: string
+        }
+        Update: {
+          adjustment_type?: string
+          amount_centavos?: number
+          created_at?: string
+          created_by?: string | null
+          currency?: string
+          description?: string
+          id?: string
+          line_no?: number | null
+          purchase_order_id?: string | null
+          raw_text?: string | null
+          source_document_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "document_financial_adjustments_purchase_order_id_fkey"
+            columns: ["purchase_order_id"]
+            isOneToOne: false
+            referencedRelation: "purchase_orders"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "document_financial_adjustments_source_document_id_fkey"
+            columns: ["source_document_id"]
+            isOneToOne: false
+            referencedRelation: "source_documents"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       exchange_rates: {
         Row: {
           base: string
@@ -893,36 +950,90 @@ export type Database = {
       purchase_order_lines: {
         Row: {
           amount_centavos: number
+          class: string | null
+          confidence: number
+          configuration: string | null
           created_at: string
           description: string
+          frame_color: string | null
+          glass_color: string | null
+          glass_thickness_mm: number | null
+          glass_type: string | null
+          hardware: Json
+          height_mm: number | null
+          human_review_required: boolean
           id: string
           line_no: number
+          opening_code: string | null
+          product_family: string | null
           purchase_order_id: string
           quantity: number
+          raw_description: string | null
+          raw_dimensions: string | null
+          source_document_id: string | null
+          system: string | null
           unit: string
           unit_price_centavos: number
+          vat_centavos: number | null
+          width_mm: number | null
         }
         Insert: {
           amount_centavos?: number
+          class?: string | null
+          confidence?: number
+          configuration?: string | null
           created_at?: string
           description?: string
+          frame_color?: string | null
+          glass_color?: string | null
+          glass_thickness_mm?: number | null
+          glass_type?: string | null
+          hardware?: Json
+          height_mm?: number | null
+          human_review_required?: boolean
           id?: string
           line_no?: number
+          opening_code?: string | null
+          product_family?: string | null
           purchase_order_id: string
           quantity?: number
+          raw_description?: string | null
+          raw_dimensions?: string | null
+          source_document_id?: string | null
+          system?: string | null
           unit?: string
           unit_price_centavos?: number
+          vat_centavos?: number | null
+          width_mm?: number | null
         }
         Update: {
           amount_centavos?: number
+          class?: string | null
+          confidence?: number
+          configuration?: string | null
           created_at?: string
           description?: string
+          frame_color?: string | null
+          glass_color?: string | null
+          glass_thickness_mm?: number | null
+          glass_type?: string | null
+          hardware?: Json
+          height_mm?: number | null
+          human_review_required?: boolean
           id?: string
           line_no?: number
+          opening_code?: string | null
+          product_family?: string | null
           purchase_order_id?: string
           quantity?: number
+          raw_description?: string | null
+          raw_dimensions?: string | null
+          source_document_id?: string | null
+          system?: string | null
           unit?: string
           unit_price_centavos?: number
+          vat_centavos?: number | null
+          width_mm?: number | null
         }
         Relationships: [
           {
@@ -930,6 +1041,13 @@ export type Database = {
             columns: ["purchase_order_id"]
             isOneToOne: false
             referencedRelation: "purchase_orders"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "purchase_order_lines_source_document_id_fkey"
+            columns: ["source_document_id"]
+            isOneToOne: false
+            referencedRelation: "source_documents"
             referencedColumns: ["id"]
           },
         ]
@@ -1211,6 +1329,9 @@ export type Database = {
       }
       source_documents: {
         Row: {
+          buyer_address: string | null
+          buyer_name: string | null
+          buyer_tin: string | null
           conflicts: Json
           created_at: string
           created_by: string | null
@@ -1218,24 +1339,40 @@ export type Database = {
           customer_name: string | null
           doc_date: string | null
           doc_type: string
+          document_number: string | null
+          expected_date: string | null
           extracted: Json
+          extraction_version: string | null
           file_size: number | null
           filename: string | null
           human_review_required: boolean
           id: string
           ingestion_status: string
+          instructions: string | null
+          learned_at: string | null
           location: string | null
+          memo: string | null
           mime_type: string | null
           missing_information: Json
+          mrs_number: string | null
           notes: string | null
+          payment_terms_raw: string | null
           project_id: string | null
           project_name: string | null
           reference: string | null
           storage_bucket: string | null
           storage_path: string | null
+          supplier_address: string | null
+          supplier_contact_person: string | null
+          supplier_name: string | null
+          supplier_phone: string | null
+          transaction_id: string | null
           updated_at: string
         }
         Insert: {
+          buyer_address?: string | null
+          buyer_name?: string | null
+          buyer_tin?: string | null
           conflicts?: Json
           created_at?: string
           created_by?: string | null
@@ -1243,24 +1380,40 @@ export type Database = {
           customer_name?: string | null
           doc_date?: string | null
           doc_type?: string
+          document_number?: string | null
+          expected_date?: string | null
           extracted?: Json
+          extraction_version?: string | null
           file_size?: number | null
           filename?: string | null
           human_review_required?: boolean
           id?: string
           ingestion_status?: string
+          instructions?: string | null
+          learned_at?: string | null
           location?: string | null
+          memo?: string | null
           mime_type?: string | null
           missing_information?: Json
+          mrs_number?: string | null
           notes?: string | null
+          payment_terms_raw?: string | null
           project_id?: string | null
           project_name?: string | null
           reference?: string | null
           storage_bucket?: string | null
           storage_path?: string | null
+          supplier_address?: string | null
+          supplier_contact_person?: string | null
+          supplier_name?: string | null
+          supplier_phone?: string | null
+          transaction_id?: string | null
           updated_at?: string
         }
         Update: {
+          buyer_address?: string | null
+          buyer_name?: string | null
+          buyer_tin?: string | null
           conflicts?: Json
           created_at?: string
           created_by?: string | null
@@ -1268,21 +1421,34 @@ export type Database = {
           customer_name?: string | null
           doc_date?: string | null
           doc_type?: string
+          document_number?: string | null
+          expected_date?: string | null
           extracted?: Json
+          extraction_version?: string | null
           file_size?: number | null
           filename?: string | null
           human_review_required?: boolean
           id?: string
           ingestion_status?: string
+          instructions?: string | null
+          learned_at?: string | null
           location?: string | null
+          memo?: string | null
           mime_type?: string | null
           missing_information?: Json
+          mrs_number?: string | null
           notes?: string | null
+          payment_terms_raw?: string | null
           project_id?: string | null
           project_name?: string | null
           reference?: string | null
           storage_bucket?: string | null
           storage_path?: string | null
+          supplier_address?: string | null
+          supplier_contact_person?: string | null
+          supplier_name?: string | null
+          supplier_phone?: string | null
+          transaction_id?: string | null
           updated_at?: string
         }
         Relationships: [
