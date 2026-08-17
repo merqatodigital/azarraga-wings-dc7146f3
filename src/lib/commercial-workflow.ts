@@ -41,9 +41,10 @@ export type QuoteDraft = {
   leadTime?: string;
   lines: QuoteLineDraft[];
 };
-const fail = (label: string, error: any): never => {
+const fail: (label: string, error: any) => never = (label, error) => {
   throw new Error(`${label}: ${error?.message || String(error)}`);
 };
+
 
 export async function createLeadWorkflow(input: LeadDraft) {
   const {
