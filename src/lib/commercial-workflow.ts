@@ -563,7 +563,7 @@ export async function uploadCommercialDocument(
     path = `${user.id}/${Date.now()}-${safe}`;
   const { error: up } = await supabase.storage
     .from("commercial-documents")
-    .upload(path, file, { contentType: file.type || undefined, upsert: false });
+    .upload(path, file, { ...(file.type ? { contentType: file.type } : {}), upsert: false });
   if (up) fail("Upload document", up);
   const { data, error } = await supabase
     .from("client_documents")
