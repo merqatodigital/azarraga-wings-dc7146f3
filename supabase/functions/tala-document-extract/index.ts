@@ -32,38 +32,47 @@ const extractionRules = `You are TALA, the Azarraga Commercial Document Extracto
 Read the attached document (invoice, purchase order, quotation, receipt or supplier quote) and extract EVERY visible field.
 
 Extract for all documents:
-- Document type: purchase_order | invoice | quotation | receipt | supplier_quote | lead
-- Reference/number, document date, expected/due date, payment terms, delivery terms, notes/memo
-- Supplier/seller: name, address, contact person, phone
-- Customer/buyer: name, company, address, contact, email, phone, TIN
-- Project: name, location, description
+- Document type: purchase_order | invoice | quotation | receipt | supplier_quote
+- Reference/number, document date, expected/delivery date, MRS/PR number, payment terms, delivery schedule, memo, transaction id, special instructions
+- Supplier/seller (the party issuing goods): name, address, TIN, contact person, email, phone
+- Buyer/customer (the party being billed): name, business style/company, address, TIN, contact person, email, phone
+- Project: name, location
 - Every line item, in printed order
+- Non-product charges (crating, shipping, trucking, delivery, installation, discount) as "adjustments", NOT as product lines
 
-For glass / aluminum lines extract: opening code, product family, system (sliding/swing/frameless/fixed/bi-fold/awning/casement),
-glass thickness in mm, glass type (tempered/annealed/laminated), glass color, frame material and color,
-hardware, width_mm, height_mm, quantity, unit, unit price, amount.
+For glass / aluminum lines extract: opening code, product family (Jalousie, Door, Window, Railing, Shower, Fixed Glass...),
+system (sliding/swing/frameless/fixed/bi-fold/awning/casement), configuration, glass thickness in mm, glass type
+(tempered/annealed/laminated), glass color, frame color, hardware, width_mm, height_mm (convert metres like 0.60x1.35 to 600 x 1350),
+raw dimensions as printed, quantity, unit, unit price, VAT, amount.
 
 Return ONLY one valid JSON object:
 {
-  "docType": "purchase_order|invoice|quotation|receipt|supplier_quote|lead|unknown",
+  "docType": "purchase_order|invoice|quotation|receipt|supplier_quote|unknown",
   "reference": null,
   "docDate": null,
   "expectedDate": null,
+  "mrsNumber": null,
+  "prNumber": null,
   "paymentTerms": null,
-  "deliveryTerms": null,
+  "paymentMilestones": [],
+  "deliverySchedule": null,
   "memo": null,
-  "supplier": { "name": null, "address": null, "contact": null, "phone": null },
-  "customer": { "name": null, "company": null, "address": null, "contact": null, "email": null, "phone": null, "tin": null },
-  "project": { "name": null, "location": null, "description": null },
+  "transactionId": null,
+  "instructions": null,
+  "supplier": { "name": null, "address": null, "tin": null, "contactPerson": null, "email": null, "phone": null },
+  "buyer": { "name": null, "businessStyle": null, "address": null, "tin": null, "contactPerson": null, "email": null, "phone": null },
+  "project": { "name": null, "location": null },
   "lines": [
     { "lineNo": 1, "openingCode": null, "rawDescription": "", "quantity": 0, "unit": "pc",
-      "unitPriceCentavos": 0, "amountCentavos": 0, "productFamily": null, "system": null,
-      "glass": null, "glassThicknessMm": null, "glassType": null, "glassColor": null,
-      "frame": null, "frameColor": null, "widthMm": null, "heightMm": null,
+      "unitPriceCentavos": 0, "vatCentavos": null, "amountCentavos": 0, "productFamily": null, "system": null,
+      "configuration": null, "glassThicknessMm": null, "glassType": null, "glassColor": null,
+      "frameColor": null, "widthMm": null, "heightMm": null, "rawDimensions": null, "class": null,
       "hardware": [], "confidence": 1, "humanReviewRequired": false }
   ],
-  "adjustments": [],
-  "financialSummary": { "subtotalCentavos": null, "taxCentavos": null, "totalCentavos": null, "balanceCentavos": null },
+  "adjustments": [
+    { "type": "CRATING|SHIPPING|TRUCKING|DELIVERY|INSTALLATION|DISCOUNT|OTHER", "description": "", "amountCentavos": 0, "rawText": null }
+  ],
+  "financialSummary": { "subtotalCentavos": null, "amountWithoutTaxCentavos": null, "vatCentavos": null, "totalCentavos": null },
   "missingInformation": [],
   "conflicts": []
 }
