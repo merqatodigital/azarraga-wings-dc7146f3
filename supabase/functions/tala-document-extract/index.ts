@@ -1,456 +1,357 @@
 // ============================================================
 // TALA DOCUMENT EXTRACT EDGE FUNCTION
+// Reads a private Storage document and extracts every commercial
+// field with an OpenRouter vision model. Returns the extraction
+// object itself so the app's learning path can persist it.
 // ============================================================
 
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.112.3';
+import "jsr:@supabase/functions-js/edge-runtime.d.ts";
+import { createClient } from "jsr:@supabase/supabase-js@2";
 
-// ============================================================
-// EXTRACTION PROMPTS 
-// ============================================================
+const cors = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Content-Type": "application/json",
+};
+const respond = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), { status, headers: cors });
 
-const extractionRules = `You are TALA, the Azarraga Commercial Document Extractor for glass, doors, and aluminum products.
+const OPENROUTER_CHAT = "https://openrouter.ai/api/v1/chat/completions";
 
-**EXTRACT EVERY FIELD WITH MAXIMUM ACCURACY:**
+// Vision-capable models, best first. Every id below is a real OpenRouter model.
+const VISION_MODELS = [
+  "google/gemini-2.5-flash",
+  "google/gemini-2.0-flash-001",
+  "openai/gpt-4o-mini",
+  "qwen/qwen2.5-vl-72b-instruct",
+];
 
-For ALL documents, extract:
-- Document type: purchase_order | invoice | quotation | lead | supplier_quote
-- Reference/Number: PO-XXXXX, INV-XXXXX, Q-XXXXX
-- Date: Philippine format (MM/DD/YYYY or DD-MM-YYYY)
-- Customer: name, company, address, contact person, email, phone, TIN
-- Project: name, location, description
-- Products/Line items: ALL visible items with their specs
+const extractionRules = `You are TALA, the Azarraga Commercial Document Extractor for glass, doors and aluminum products.
 
-For GLASS/ALUMINUM products, extract these SPECIFIC fields:
-- GLASS: thickness (mm), type (tempered/annealed/laminated), color (clear/bronze/gray/blue), dimensions
-- FRAME: material (aluminum/stainless/wood), finish (analok/painted/anodized)
-- SYSTEM: sliding/swing/frameless/fixed/bi-fold/awning/casement
-- HARDWARE: handles, hinges, locks, rollers, tracks
-- DIMENSIONS: width_mm, height_mm, thickness_mm
-- QUANTITY: number of units (doors, windows, panels)
-- UNIT PRICE: PHP per unit (convert to centavos)
-- TOTAL: PHP total (convert to centavos)
+Read the attached document (invoice, purchase order, quotation, receipt or supplier quote) and extract EVERY visible field.
 
-For LEADS, extract:
-- Project name, location, description
-- Contact: name, phone, email, company
-- Requirements: glass type, door type, aluminum specs, quantity
-- Budget range (if mentioned)
+Extract for all documents:
+- Document type: purchase_order | invoice | quotation | receipt | supplier_quote
+- Reference/number, document date, expected/delivery date, MRS/PR number, payment terms, delivery schedule, memo, transaction id, special instructions
+- Supplier/seller (the party issuing goods): name, address, TIN, contact person, email, phone
+- Buyer/customer (the party being billed): name, business style/company, address, TIN, contact person, email, phone
+- Project: name, location
+- Every line item, in printed order
+- Non-product charges (crating, shipping, trucking, delivery, installation, discount) as "adjustments", NOT as product lines
 
-For QUOTES, extract:
-- Quote number, date, customer, project
-- ALL line items with descriptions, quantities, prices
-- Payment terms, delivery terms, validity period
-- Subtotal, tax, total
+For glass / aluminum lines extract: opening code, product family (Jalousie, Door, Window, Railing, Shower, Fixed Glass...),
+system (sliding/swing/frameless/fixed/bi-fold/awning/casement), configuration, glass thickness in mm, glass type
+(tempered/annealed/laminated), glass color, frame color, hardware, width_mm, height_mm (convert metres like 0.60x1.35 to 600 x 1350),
+raw dimensions as printed, quantity, unit, unit price, VAT, amount.
 
-For INVOICES, extract:
-- Invoice number, date, customer, project
-- ALL line items with descriptions, quantities, prices
-- Payment terms, due date
-- Subtotal, tax, total, balance
-
-Return ONLY valid JSON with this structure:
+Return ONLY one valid JSON object:
 {
-  "docType": "purchase_order|invoice|quotation|lead|supplier_quote|unknown",
+  "docType": "purchase_order|invoice|quotation|receipt|supplier_quote|unknown",
   "reference": null,
   "docDate": null,
   "expectedDate": null,
-  "customer": {
-    "name": null,
-    "company": null,
-    "address": null,
-    "contact": null,
-    "email": null,
-    "phone": null,
-    "tin": null
-  },
-  "project": {
-    "name": null,
-    "location": null,
-    "description": null
-  },
-  "lines": [
-    {
-      "lineNo": 1,
-      "rawDescription": null,
-      "quantity": 0,
-      "unit": "pc",
-      "unitPriceCentavos": 0,
-      "amountCentavos": 0,
-      "productFamily": null,
-      "system": null,
-      "glass": null,
-      "glassThicknessMm": null,
-      "glassType": null,
-      "glassColor": null,
-      "frame": null,
-      "frameColor": null,
-      "widthMm": null,
-      "heightMm": null,
-      "hardware": [],
-      "confidence": 1,
-      "humanReviewRequired": false
-    }
-  ],
-  "financialSummary": {
-    "subtotalCentavos": null,
-    "taxCentavos": null,
-    "totalCentavos": null,
-    "balanceCentavos": null
-  },
+  "mrsNumber": null,
+  "prNumber": null,
   "paymentTerms": null,
-  "deliveryTerms": null,
-  "validityPeriod": null,
-  "notes": null,
+  "paymentMilestones": [],
+  "deliverySchedule": null,
+  "memo": null,
+  "transactionId": null,
+  "instructions": null,
+  "supplier": { "name": null, "address": null, "tin": null, "contactPerson": null, "email": null, "phone": null },
+  "buyer": { "name": null, "businessStyle": null, "address": null, "tin": null, "contactPerson": null, "email": null, "phone": null },
+  "project": { "name": null, "location": null },
+  "lines": [
+    { "lineNo": 1, "openingCode": null, "rawDescription": "", "quantity": 0, "unit": "pc",
+      "unitPriceCentavos": 0, "vatCentavos": null, "amountCentavos": 0, "productFamily": null, "system": null,
+      "configuration": null, "glassThicknessMm": null, "glassType": null, "glassColor": null,
+      "frameColor": null, "widthMm": null, "heightMm": null, "rawDimensions": null, "class": null,
+      "hardware": [], "confidence": 1, "humanReviewRequired": false }
+  ],
+  "adjustments": [
+    { "type": "CRATING|SHIPPING|TRUCKING|DELIVERY|INSTALLATION|DISCOUNT|OTHER", "description": "", "amountCentavos": 0, "rawText": null }
+  ],
+  "financialSummary": { "subtotalCentavos": null, "amountWithoutTaxCentavos": null, "vatCentavos": null, "totalCentavos": null },
   "missingInformation": [],
   "conflicts": []
 }
 
-**CRITICAL:** 
-- Amounts MUST be in integer centavos (₱1,000.00 = 100000 centavos)
-- If ANY field cannot be extracted, return null - NEVER invent data
-- If confidence is low, set confidence < 1 and humanReviewRequired: true
-- Preserve raw descriptions exactly as they appear
+CRITICAL:
+- All money is INTEGER CENTAVOS (PHP 1,000.00 = 100000).
+- Never invent data. Unknown fields are null.
+- Preserve raw descriptions exactly as printed.
+- Set confidence < 1 and humanReviewRequired true when a line is uncertain.
+- No markdown, no commentary outside the JSON object.`;
 
-**DO NOT** include markdown, explanations, or text outside the JSON object.`;
+// ---------------- JSON recovery ----------------
 
-// ============================================================
-// HELPER FUNCTIONS
-// ============================================================
-
-function parseExtractionText(text: string) {
-  let cleaned = text
-    .trim()
-    .replace(/^```json\s*/i, '')
-    .replace(/^```\s*/, '')
-    .replace(/```\s*$/, '')
-    .replace(/^["']+|["']+$/g, '')
-    .trim();
-
-  const jsonMatch = cleaned.match(/(\{[\s\S]*\})/);
-  if (jsonMatch && jsonMatch[1]) {
-    try {
-      return JSON.parse(jsonMatch[1]);
-    } catch (e) {
-      // Continue
+function balancedJsonObjects(text: string) {
+  const objects: string[] = [];
+  let start = -1;
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const c = text[i];
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (c === "\\") escaped = true;
+      else if (c === '"') quoted = false;
+      continue;
+    }
+    if (c === '"') quoted = true;
+    else if (c === "{") {
+      if (depth === 0) start = i;
+      depth += 1;
+    } else if (c === "}" && depth > 0) {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        objects.push(text.slice(start, i + 1));
+        start = -1;
+      }
     }
   }
-
-  try {
-    return JSON.parse(cleaned);
-  } catch (e) {
-    throw new Error('Failed to parse extraction JSON');
-  }
+  return objects.sort((a, b) => b.length - a.length);
 }
+
+const str = (value: unknown) => {
+  const text = String(value ?? "").trim();
+  return text && text !== "null" && text !== "undefined" ? text : null;
+};
+const num = (...values: unknown[]) => {
+  for (const value of values) {
+    if (value === null || value === undefined || value === "") continue;
+    const parsed = Number(String(value).replace(/[^0-9.-]/g, ""));
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+};
 
 function normalizeExtraction(value: any) {
   if (!value || typeof value !== "object") throw new Error("missing extraction object");
-  if (!Array.isArray(value.lines)) value.lines = [];
-  
-  value.lines = value.lines.map((line: any, index: number) => ({
-    ...line,
-    lineNo: Number(line.lineNo) || index + 1,
-    quantity: Number.isFinite(Number(line.quantity)) ? Number(line.quantity) : 0,
-    unit: String(line.unit || "pc"),
-    rawDescription: String(line.rawDescription || line.raw_description || line.description || ""),
-    productFamily: String(line.productFamily || line.product_family || null) || null,
-    system: String(line.system || null) || null,
-    glass: String(line.glass || null) || null,
-    glassThicknessMm: Number.isFinite(Number(line.glassThicknessMm || line.glass_thickness_mm)) 
-      ? Number(line.glassThicknessMm || line.glass_thickness_mm) 
-      : null,
-    glassType: String(line.glassType || line.glass_type || null) || null,
-    glassColor: String(line.glassColor || line.glass_color || null) || null,
-    frame: String(line.frame || null) || null,
-    frameColor: String(line.frameColor || line.frame_color || null) || null,
-    widthMm: Number.isFinite(Number(line.widthMm || line.width_mm)) 
-      ? Number(line.widthMm || line.width_mm) 
-      : null,
-    heightMm: Number.isFinite(Number(line.heightMm || line.height_mm)) 
-      ? Number(line.heightMm || line.height_mm) 
-      : null,
-    hardware: Array.isArray(line.hardware) ? line.hardware : [],
-    unitPriceCentavos: Number.isFinite(Number(line.unitPriceCentavos || line.unit_price_centavos)) 
-      ? Number(line.unitPriceCentavos || line.unit_price_centavos) 
-      : 0,
-    amountCentavos: Number.isFinite(Number(line.amountCentavos || line.amount_centavos)) 
-      ? Number(line.amountCentavos || line.amount_centavos) 
-      : 0,
-    confidence: Number.isFinite(Number(line.confidence)) ? Number(line.confidence) : 1,
-    humanReviewRequired: Boolean(
-      line.humanReviewRequired ||
-      !String(line.rawDescription || line.raw_description || line.description || "").trim(),
-    ),
-  }));
-  
+  const lines = Array.isArray(value.lines) ? value.lines : [];
+  value.lines = lines.map((line: any, index: number) => {
+    const description = str(line.rawDescription ?? line.raw_description ?? line.description) || "";
+    const quantity = num(line.quantity) ?? 0;
+    const unitPrice = num(line.unitPriceCentavos, line.unit_price_centavos) ?? 0;
+    const amount = num(line.amountCentavos, line.amount_centavos) ?? Math.round(quantity * unitPrice);
+    return {
+      ...line,
+      lineNo: num(line.lineNo, line.line_no) ?? index + 1,
+      openingCode: str(line.openingCode ?? line.opening_code),
+      rawDescription: description,
+      description,
+      quantity,
+      unit: str(line.unit) || "pc",
+      unitPriceCentavos: unitPrice,
+      amountCentavos: amount,
+      productFamily: str(line.productFamily ?? line.product_family),
+      system: str(line.system),
+      glass: str(line.glass),
+      glassThicknessMm: num(line.glassThicknessMm, line.glass_thickness_mm),
+      glassType: str(line.glassType ?? line.glass_type),
+      glassColor: str(line.glassColor ?? line.glass_color),
+      frame: str(line.frame),
+      frameColor: str(line.frameColor ?? line.frame_color),
+      widthMm: num(line.widthMm, line.width_mm),
+      heightMm: num(line.heightMm, line.height_mm),
+      hardware: Array.isArray(line.hardware) ? line.hardware : [],
+      confidence: num(line.confidence) ?? 1,
+      humanReviewRequired: Boolean(line.humanReviewRequired) || !description,
+    };
+  });
   value.adjustments = Array.isArray(value.adjustments) ? value.adjustments : [];
   value.paymentMilestones = Array.isArray(value.paymentMilestones) ? value.paymentMilestones : [];
-  value.missingInformation = Array.isArray(value.missingInformation)
-    ? value.missingInformation
-    : [];
+  value.missingInformation = Array.isArray(value.missingInformation) ? value.missingInformation : [];
   value.conflicts = Array.isArray(value.conflicts) ? value.conflicts : [];
-  
-  if (!value.customer) value.customer = {};
-  if (!value.project) value.project = {};
-  if (!value.financialSummary) value.financialSummary = {};
-  
+  value.customer = value.customer && typeof value.customer === "object" ? value.customer : {};
+  value.supplier = value.supplier && typeof value.supplier === "object" ? value.supplier : {};
+  value.project = value.project && typeof value.project === "object" ? value.project : {};
+  value.financialSummary =
+    value.financialSummary && typeof value.financialSummary === "object"
+      ? value.financialSummary
+      : {};
+  value.docType = str(value.docType ?? value.doc_type) || "unknown";
+  value.reference = str(value.reference);
+  value.docDate = str(value.docDate ?? value.doc_date);
+  value.totalCentavos = num(value.totalCentavos, value.financialSummary?.totalCentavos);
+
+  const hasIdentity = Boolean(
+    value.reference ||
+      value.docDate ||
+      str(value.customer?.name) ||
+      str(value.supplier?.name) ||
+      str(value.project?.name) ||
+      value.financialSummary?.totalCentavos != null,
+  );
+  if (!value.lines.length && !hasIdentity)
+    throw new Error("empty extraction contained no document identity or line items");
   return value;
 }
 
-// ============================================================
-// MAIN EDGE FUNCTION HANDLER
-// ============================================================
-
-export default async function handler(req: Request, env: any) {
-  const headers = {
-    'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    'Content-Type': 'application/json',
-  };
-
-  if (req.method === 'OPTIONS') {
-    return new Response(null, { status: 204, headers });
+function parseExtractionText(text: string) {
+  const cleaned = text
+    .trim()
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/, "")
+    .replace(/```\s*$/, "")
+    .trim();
+  const candidates = [cleaned, ...balancedJsonObjects(cleaned)];
+  let lastError: unknown = new Error("no JSON object found");
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    try {
+      return normalizeExtraction(JSON.parse(candidate));
+    } catch (error) {
+      lastError = error;
+    }
   }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
 
-  if (req.method !== 'POST') {
-    return new Response(JSON.stringify({ error: 'Method not allowed' }), {
-      status: 405,
-      headers,
-    });
+// Chunked base64 so multi-megabyte scans do not blow the call stack.
+function toBase64(buffer: ArrayBuffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
   }
+  return btoa(binary);
+}
+
+function textContent(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part: any) => (typeof part === "string" ? part : typeof part?.text === "string" ? part.text : ""))
+    .filter(Boolean)
+    .join("\n");
+}
+
+Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: cors });
+  if (req.method !== "POST") return respond({ error: "Method not allowed" }, 405);
 
   try {
-    const body = await req.json();
-    const { clientDocumentId, expectedType } = body;
+    const authorization = req.headers.get("Authorization") || "";
+    if (!authorization.startsWith("Bearer ")) return respond({ error: "Unauthorized" }, 401);
 
-    if (!clientDocumentId) {
-      return new Response(JSON.stringify({ error: 'clientDocumentId is required' }), {
-        status: 400,
-        headers,
-      });
-    }
-
-    const supabase = createClient(
-      env.SUPABASE_URL,
-      env.SUPABASE_SERVICE_ROLE_KEY,
-      {
-        auth: {
-          storage: undefined,
-          persistSession: false,
-          autoRefreshToken: false,
-        },
-      }
+    const supabaseUrl = Deno.env.get("SUPABASE_URL") || "";
+    const authClient = createClient(supabaseUrl, Deno.env.get("SUPABASE_ANON_KEY") || "", {
+      global: { headers: { Authorization: authorization } },
+      auth: { persistSession: false },
+    });
+    const { data: userData, error: userError } = await authClient.auth.getUser(
+      authorization.slice(7),
     );
+    if (userError || !userData.user) return respond({ error: "Unauthorized" }, 401);
 
-    const { data: doc, error: docError } = await supabase
-      .from('client_documents')
-      .select('*')
-      .eq('id', clientDocumentId)
-      .single();
+    const key = Deno.env.get("OPENROUTER_API_KEY");
+    if (!key) return respond({ error: "OPENROUTER_API_KEY is missing from project secrets" }, 503);
 
-    if (docError || !doc) {
-      return new Response(JSON.stringify({ 
-        error: 'Document not found', 
-        details: docError?.message 
-      }), {
-        status: 404,
-        headers,
-      });
-    }
+    const body = await req.json().catch(() => ({}));
+    const clientDocumentId = String(body?.clientDocumentId || "");
+    const expectedType = str(body?.expectedType);
+    if (!clientDocumentId) return respond({ error: "clientDocumentId is required" }, 400);
 
-    const { data: fileData, error: fileError } = await supabase.storage
+    const service = createClient(supabaseUrl, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "", {
+      auth: { persistSession: false },
+    });
+
+    const { data: doc, error: docError } = await service
+      .from("client_documents")
+      .select("id,bucket,storage_path,title,mime_type,file_size")
+      .eq("id", clientDocumentId)
+      .maybeSingle();
+    if (docError || !doc) return respond({ error: "Document not found" }, 404);
+
+    const { data: file, error: fileError } = await service.storage
       .from(doc.bucket)
       .download(doc.storage_path);
+    if (fileError || !file)
+      return respond({ error: `Failed to read stored document: ${fileError?.message}` }, 500);
 
-    if (fileError || !fileData) {
-      return new Response(JSON.stringify({ 
-        error: 'Failed to download document', 
-        details: fileError?.message 
-      }), {
-        status: 500,
-        headers,
-      });
-    }
+    const mimeType = doc.mime_type || "application/octet-stream";
+    const dataUrl = `data:${mimeType};base64,${toBase64(await file.arrayBuffer())}`;
+    const isPdf = mimeType === "application/pdf" || /\.pdf$/i.test(doc.title || "");
+    const media = isPdf
+      ? { type: "file", file: { filename: doc.title || "document.pdf", file_data: dataUrl } }
+      : { type: "image_url", image_url: { url: dataUrl } };
 
-    const arrayBuffer = await fileData.arrayBuffer();
-    const base64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
-    const dataUrl = `data:${doc.mime_type || 'application/octet-stream'};base64,${base64}`;
-
-    const openRouterKey = env.OPENROUTER_API_KEY;
-    if (!openRouterKey) {
-      return new Response(JSON.stringify({ 
-        error: 'OpenRouter API key not configured',
-        extractionStatus: 'ERROR',
-        documentId: clientDocumentId,
-      }), {
-        status: 500,
-        headers,
-      });
-    }
-
-    const media = doc.mime_type?.startsWith('image/')
-      ? { type: 'image_url', image_url: { url: dataUrl } }
-      : { type: 'file', file: { filename: doc.title, file_data: dataUrl } };
-
-    const models = [
-      'google/gemini-2.0-flash-exp',
-      'openrouter/free',
-    ];
-
-    let extractionResult = null;
-    let lastError = null;
-
-    for (const modelId of models) {
-      try {
-        const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${openRouterKey}`,
-            'Content-Type': 'application/json',
-            'HTTP-Referer': 'https://github.com/merqatodigital/azarraga-wings-dc7146f3',
-            'X-Title': 'Azarraga Commercial Agent',
-          },
-          body: JSON.stringify({
-            model: modelId,
-            messages: [
-              {
-                role: 'system',
-                content: extractionRules,
-              },
-              {
-                role: 'user',
-                content: [
-                  {
-                    type: 'text',
-                    text: `Extract ALL data from ${doc.title}. ${expectedType ? `Expected document type: ${expectedType}` : ''}`,
-                  },
-                  media,
-                ],
-              },
-            ],
-            temperature: 0,
-            max_tokens: 12000,
-          }),
-        });
-
-        const raw = await response.text();
-        let result;
+    const failures: string[] = [];
+    for (const model of VISION_MODELS) {
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
         try {
-          result = JSON.parse(raw);
-        } catch {
-          throw new Error('OpenRouter returned non-JSON response');
-        }
+          const response = await fetch(OPENROUTER_CHAT, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${key}`,
+              "Content-Type": "application/json",
+              "HTTP-Referer": supabaseUrl,
+              "X-Title": "Azarraga Commercial Agent",
+            },
+            body: JSON.stringify({
+              model,
+              messages: [
+                { role: "system", content: extractionRules },
+                {
+                  role: "user",
+                  content: [
+                    {
+                      type: "text",
+                      text: `Read ${doc.title || "this document"} and extract every visible field and line item.${
+                        expectedType ? ` Expected document type: ${expectedType}.` : ""
+                      }${attempt > 1 ? " The previous attempt was not valid JSON — return one valid JSON object only." : ""}`,
+                    },
+                    media,
+                  ],
+                },
+              ],
+              response_format: { type: "json_object" },
+              ...(isPdf
+                ? { plugins: [{ id: "file-parser", pdf: { engine: "pdf-text" } }] }
+                : {}),
+              temperature: 0,
+              max_tokens: 16000,
+            }),
+          });
 
-        if (!response.ok) {
-          throw new Error(result?.error?.message || `HTTP ${response.status}`);
-        }
+          const raw = await response.text();
+          let result: any;
+          try {
+            result = JSON.parse(raw);
+          } catch {
+            throw new Error(`non-JSON API response (${response.status})`);
+          }
+          if (!response.ok)
+            throw new Error(result?.error?.message || `OpenRouter returned ${response.status}`);
 
-        const content = result?.choices?.[0]?.message?.content;
-        if (!content) {
-          throw new Error('No content in response');
-        }
+          const content = textContent(result?.choices?.[0]?.message?.content);
+          if (!content) throw new Error("no extraction content returned");
 
-        extractionResult = parseExtractionText(content);
-        extractionResult.extractionModel = modelId;
-        extractionResult = normalizeExtraction(extractionResult);
-        
-        if (extractionResult.lines?.length > 0 || extractionResult.customer?.name) {
-          break;
+          const extraction = parseExtractionText(content);
+          extraction.extractionModel = model;
+          if (expectedType && extraction.docType === "unknown") extraction.docType = expectedType;
+          return respond(extraction);
+        } catch (error) {
+          failures.push(`${model}: ${error instanceof Error ? error.message : String(error)}`);
         }
-
-      } catch (error: any) {
-        lastError = error;
-        continue;
       }
     }
 
-    if (!extractionResult) {
-      return new Response(JSON.stringify({
-        error: 'All extraction models failed',
-        details: lastError?.message || 'Unknown error',
-        extractionStatus: 'FAILED',
-        documentId: clientDocumentId,
-      }), {
-        status: 500,
-        headers,
-      });
-    }
-
-    const category = extractionResult.docType || 'unknown';
-    await supabase
-      .from('client_documents')
-      .update({ category })
-      .eq('id', clientDocumentId);
-
-    const { data: sourceDoc, error: sourceError } = await supabase
-      .from('source_documents')
-      .insert({
-        doc_type: extractionResult.docType,
-        reference: extractionResult.reference,
-        filename: doc.title,
-        storage_bucket: doc.bucket,
-        storage_path: doc.storage_path,
-        mime_type: doc.mime_type,
-        file_size: doc.file_size,
-        customer_name: extractionResult.customer?.name,
-        project_name: extractionResult.project?.name,
-        location: extractionResult.project?.location,
-        doc_date: extractionResult.docDate,
-        expected_date: extractionResult.expectedDate,
-        payment_terms_raw: extractionResult.paymentTerms,
-        extracted: extractionResult,
-        missing_information: extractionResult.missingInformation || [],
-        conflicts: extractionResult.conflicts || [],
-        human_review_required: extractionResult.lines?.some((l: any) => l.humanReviewRequired) || false,
-        ingestion_status: 'EXTRACTED',
-        extraction_version: 'tala-document-v2',
-        learned_at: new Date().toISOString(),
-      })
-      .select('id')
-      .single();
-
-    if (sourceError) {
-      return new Response(JSON.stringify({
-        error: 'Failed to save extraction',
-        details: sourceError.message,
-        extractionStatus: 'SAVE_FAILED',
-        documentId: clientDocumentId,
-        extraction: extractionResult,
-      }), {
-        status: 500,
-        headers,
-      });
-    }
-
-    await supabase
-      .from('client_documents')
-      .update({ source_document_id: sourceDoc.id })
-      .eq('id', clientDocumentId);
-
-    return new Response(JSON.stringify({
-      success: true,
-      documentId: clientDocumentId,
-      sourceDocumentId: sourceDoc.id,
-      extractionStatus: 'COMPLETE',
-      docType: extractionResult.docType,
-      reference: extractionResult.reference,
-      linesExtracted: extractionResult.lines?.length || 0,
-      humanReviewRequired: extractionResult.lines?.some((l: any) => l.humanReviewRequired) || false,
-      extraction: extractionResult,
-      model: extractionResult.extractionModel,
-    }), {
-      status: 200,
-      headers,
-    });
-
-  } catch (error: any) {
-    return new Response(JSON.stringify({
-      error: 'Document extraction failed',
-      details: error?.message || 'Unknown error',
-      extractionStatus: 'ERROR',
-    }), {
-      status: 500,
-      headers,
-    });
+    return respond(
+      {
+        error: `TALA could not extract this document. ${failures.join(" | ")}`,
+      },
+      502,
+    );
+  } catch (error) {
+    console.error("[TALA extract]", error);
+    return respond(
+      { error: error instanceof Error ? error.message : "Unexpected extraction failure" },
+      500,
+    );
   }
-}
+});

@@ -72,8 +72,10 @@ function salvageExtraction(text: string): any {
       phone: phoneMatch?.[1] || null,
     },
     lines: [],
-    financialSummary: { 
-      totalCentavos: totalMatch ? Math.round(parseFloat(totalMatch[1].replace(/,/g, '')) * 100) : null 
+    financialSummary: {
+      totalCentavos: totalMatch?.[1]
+        ? Math.round(parseFloat(totalMatch[1].replace(/,/g, '')) * 100)
+        : null,
     },
     missingInformation: ["Extraction was partially recovered from text. Review the original document."],
     conflicts: [],
